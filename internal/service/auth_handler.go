@@ -2,12 +2,102 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// RateLimitEntry holds attempts and block timestamps.
+type RateLimitEntry struct {
+	Attempts     int
+	BlockedUntil time.Time
+}
+
+// LoginRateLimiter enforces brute-force protection.
+type LoginRateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*RateLimitEntry
+}
+
+// NewLoginRateLimiter initializes a rate limiter.
+func NewLoginRateLimiter() *LoginRateLimiter {
+	return &LoginRateLimiter{
+		entries: make(map[string]*RateLimitEntry),
+	}
+}
+
+// Allow checks if the IP is allowed to attempt login.
+func (l *LoginRateLimiter) Allow(ip string) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	entry, exists := l.entries[ip]
+	if !exists {
+		return true, 0
+	}
+
+	if entry.BlockedUntil.After(now) {
+		return false, entry.BlockedUntil.Sub(now)
+	}
+
+	// Reset attempts if the block duration has expired
+	if entry.BlockedUntil.Before(now) && entry.Attempts >= 5 {
+		entry.Attempts = 0
+	}
+
+	return true, 0
+}
+
+// RecordFailure increments attempts and blocks if threshold is reached.
+func (l *LoginRateLimiter) RecordFailure(ip string) (int, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	entry, exists := l.entries[ip]
+	if !exists {
+		entry = &RateLimitEntry{}
+		l.entries[ip] = entry
+	}
+
+	entry.Attempts++
+	if entry.Attempts >= 5 {
+		blockDuration := 5 * time.Minute
+		entry.BlockedUntil = now.Add(blockDuration)
+		return entry.Attempts, blockDuration
+	}
+
+	return entry.Attempts, 0
+}
+
+// RecordSuccess clears attempts upon successful login.
+func (l *LoginRateLimiter) RecordSuccess(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	delete(l.entries, ip)
+}
+
+func getClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if rip := r.Header.Get("X-Real-IP"); rip != "" {
+		return rip
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
 
 // LoginRequest holds credentials for login.
 type LoginRequest struct {
@@ -24,6 +114,7 @@ type ChangePasswordRequest struct {
 type AuthHandler struct {
 	settings *ServerSettings
 	jwtKey   []byte
+	limiter  *LoginRateLimiter
 }
 
 // NewAuthHandler creates a new AuthHandler with a static signing key.
@@ -31,11 +122,22 @@ func NewAuthHandler(settings *ServerSettings) *AuthHandler {
 	return &AuthHandler{
 		settings: settings,
 		jwtKey:   []byte("icpc-remote-control-jwt-secret-key-signature"),
+		limiter:  NewLoginRateLimiter(),
 	}
 }
 
 // Login handles admin authentication (POST /api/auth/login).
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	ip := getClientIP(r)
+
+	// Check if IP is blocked
+	if allowed, blockDuration := h.limiter.Allow(ip); !allowed {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": fmt.Sprintf("登录失败次数过多，请在 %d 秒后再试", int(blockDuration.Seconds())),
+		})
+		return
+	}
+
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -43,9 +145,22 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.settings.VerifyPassword(req.Password) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "密码不正确"})
+		attempts, blockDuration := h.limiter.RecordFailure(ip)
+		if blockDuration > 0 {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error": "密码错误。尝试失败次数过多，该 IP 已被锁定 5 分钟",
+			})
+		} else {
+			remaining := 5 - attempts
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": fmt.Sprintf("密码不正确，剩余尝试次数：%d", remaining),
+			})
+		}
 		return
 	}
+
+	// Reset rate limits on success
+	h.limiter.RecordSuccess(ip)
 
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &jwt.RegisteredClaims{
