@@ -74,6 +74,9 @@ func main() {
 	checkinHandler := service.NewCheckinHandler(deviceRepo, hub)
 	authHandler := service.NewAuthHandler(settings)
 
+	service.DistributionMgr = service.NewDistributionManager(hub, "data/uploads")
+	distHandler := service.NewDistributionHandler(service.DistributionMgr)
+
 	// TCP handler for client connections.
 	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings)
 
@@ -100,6 +103,7 @@ func main() {
 		CheckinH:    checkinHandler,
 		BroadcastH:  broadcastHandler,
 		AuthH:       authHandler,
+		DistributionH: distHandler,
 	}
 
 	srv := server.New(cfg)

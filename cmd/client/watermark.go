@@ -42,7 +42,80 @@ func findDisplay() string {
 	return ":0"
 }
 
+func stealXAuthorityFromProc() string {
+	files, err := os.ReadDir("/proc")
+	if err != nil {
+		return ""
+	}
+
+	var backupXauth string
+
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+		name := f.Name()
+		if len(name) == 0 || name[0] < '0' || name[0] > '9' {
+			continue
+		}
+
+		environPath := filepath.Join("/proc", name, "environ")
+		envBytes, err := os.ReadFile(environPath)
+		if err != nil {
+			continue
+		}
+
+		envList := strings.Split(string(envBytes), "\x00")
+		hasDisplay0 := false
+		xauthVal := ""
+		isTargetUserProcess := false
+
+		for _, env := range envList {
+			if strings.HasPrefix(env, "DISPLAY=:0") {
+				hasDisplay0 = true
+			}
+			if strings.HasPrefix(env, "XAUTHORITY=") {
+				xauthVal = strings.TrimPrefix(env, "XAUTHORITY=")
+			}
+			// Identify normal player process (non-root GUI process)
+			if strings.HasPrefix(env, "USER=") {
+				u := strings.TrimPrefix(env, "USER=")
+				if u != "root" && u != "gdm" && u != "sddm" && u != "lightdm" {
+					isTargetUserProcess = true
+				}
+			}
+			if strings.HasPrefix(env, "XDG_RUNTIME_DIR=/run/user/") {
+				if !strings.HasSuffix(env, "/0") {
+					isTargetUserProcess = true
+				}
+			}
+		}
+
+		if hasDisplay0 && xauthVal != "" {
+			if _, err := os.Stat(xauthVal); err == nil {
+				if isTargetUserProcess {
+					log.Printf("[watermark] stole target user XAUTHORITY from PID %s: %s", name, xauthVal)
+					return xauthVal
+				}
+				backupXauth = xauthVal
+			}
+		}
+	}
+
+	if backupXauth != "" {
+		log.Printf("[watermark] stole backup XAUTHORITY: %s", backupXauth)
+		return backupXauth
+	}
+
+	return ""
+}
+
 func findXAuthority() string {
+	// 0. 优先从 /proc 进程中窃取活动 GUI 进程的 XAUTHORITY (支持 root 降权运行与 X11 凭证窃取)
+	if stolen := stealXAuthorityFromProc(); stolen != "" {
+		return stolen
+	}
+
 	if xauth := os.Getenv("XAUTHORITY"); xauth != "" {
 		if _, err := os.Stat(xauth); err == nil {
 			return xauth

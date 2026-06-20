@@ -375,6 +375,7 @@ func (h *BroadcastHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	countdownTarget, _ := h.repo.GetConfig("countdown_target")
 	baseURL, _ := h.repo.GetConfig("base_url")
 	refWidth, _ := h.repo.GetConfig("reference_width")
+	pushedState, _ := h.repo.GetConfig("pushed_state")
 	if baseURL == "" {
 		baseURL = "http://icpc-server.local:8082"
 	}
@@ -386,30 +387,41 @@ func (h *BroadcastHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		CountdownTarget: countdownTarget,
 		BaseURL:         baseURL,
 		ReferenceWidth:  refWidth,
+		PushedState:     pushedState,
 	})
 }
 
 func (h *BroadcastHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg model.BroadcastConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	var req struct {
+		ActiveFont      *string `json:"active_font"`
+		CountdownTarget *string `json:"countdown_target"`
+		BaseURL         *string `json:"base_url"`
+		ReferenceWidth  *string `json:"reference_width"`
+		SyncReset       *string `json:"sync_reset"`
+		PushedState     *string `json:"pushed_state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if cfg.ActiveFont != "" {
-		h.repo.SetConfig("active_font", cfg.ActiveFont)
+	if req.ActiveFont != nil {
+		h.repo.SetConfig("active_font", *req.ActiveFont)
 	}
-	if cfg.CountdownTarget != "" {
-		h.repo.SetConfig("countdown_target", cfg.CountdownTarget)
+	if req.CountdownTarget != nil {
+		h.repo.SetConfig("countdown_target", *req.CountdownTarget)
 	}
-	if cfg.BaseURL != "" {
-		h.repo.SetConfig("base_url", cfg.BaseURL)
+	if req.BaseURL != nil {
+		h.repo.SetConfig("base_url", *req.BaseURL)
 	}
-	if cfg.ReferenceWidth != "" {
-		h.repo.SetConfig("reference_width", cfg.ReferenceWidth)
+	if req.ReferenceWidth != nil {
+		h.repo.SetConfig("reference_width", *req.ReferenceWidth)
 	}
-	if cfg.SyncReset != "" {
-		h.repo.SetConfig("broadcast_started_at_"+cfg.SyncReset, time.Now().Format(time.RFC3339Nano))
-		h.pushSyncReset(cfg.SyncReset)
+	if req.SyncReset != nil {
+		h.repo.SetConfig("broadcast_started_at_"+*req.SyncReset, time.Now().Format(time.RFC3339Nano))
+		h.pushSyncReset(*req.SyncReset)
+	}
+	if req.PushedState != nil {
+		h.repo.SetConfig("pushed_state", *req.PushedState)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "config updated"})
 }

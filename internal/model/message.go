@@ -158,3 +158,34 @@ type CommandOutputEvent struct {
 	Stream    string `json:"stream"`
 	Line      string `json:"line"`
 }
+
+// ---- File Distribution Messages ----
+
+// DistributeStartMessage (Server -> Client)
+type DistributeStartMessage struct {
+	Type       string `json:"type"` // "distribute_start"
+	TaskID     string `json:"task_id"`
+	FileName   string `json:"file_name"`
+	SenderAddr string `json:"sender_addr"` // e.g. "192.168.1.100:48080"
+	SaveDir    string `json:"save_dir"`
+	PostCmd    string `json:"post_cmd,omitempty"`
+}
+
+// DistributeCancelMessage (Server -> Client)
+type DistributeCancelMessage struct {
+	Type   string `json:"type"` // "distribute_cancel"
+	TaskID string `json:"task_id"`
+}
+
+// DistributeProgressMessage (Client -> Server)
+type DistributeProgressMessage struct {
+	Type        string  `json:"type"` // "distribute_progress"
+	TaskID      string  `json:"task_id"`
+	DeviceID    int     `json:"device_id"`
+	Downloaded  int64   `json:"downloaded"`
+	TotalChunks int64   `json:"total_chunks"`
+	Percentage  float64 `json:"percentage"`
+	SpeedMbps   int64   `json:"speed_mbps"`
+	Status      string  `json:"status"` // "idle", "downloading", "completed", "failed", "cancelled"
+	Error       string  `json:"error,omitempty"`
+}

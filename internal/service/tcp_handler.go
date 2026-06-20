@@ -169,6 +169,21 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 	default:
 	}
 
+	// Push screen monitor config to client.
+	smEnabled := h.settings.GetScreenMonitorEnabled()
+	smData, _ := json.Marshal(struct {
+		Type    string `json:"type"`
+		Enabled bool   `json:"enabled"`
+	}{
+		Type:    "screen_monitor_config",
+		Enabled: smEnabled,
+	})
+	smData = append(smData, '\n')
+	select {
+	case clientConn.Send <- smData:
+	default:
+	}
+
 	// --- Main loop ---
 	// Set a read deadline so we detect silent client disconnects within readTimeout.
 	// The deadline is refreshed on every successful message (ping, command output, etc.).
@@ -392,6 +407,30 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 					"assigned_id": assignedID,
 					"connected":   true,
 				})
+			}
+
+		case "distribute_progress":
+			var msg model.DistributeProgressMessage
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[tcp] device %d: unmarshal distribute_progress: %v", assignedID, err)
+				continue
+			}
+			if DistributionMgr != nil {
+				DistributionMgr.HandleProgressReport(msg)
+			}
+
+		case "distribute_precheck_response":
+			var msg struct {
+				DeviceID int    `json:"device_id"`
+				Success  bool   `json:"success"`
+				Error    string `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[tcp] device %d: unmarshal distribute_precheck_response: %v", assignedID, err)
+				continue
+			}
+			if DistributionMgr != nil {
+				DistributionMgr.HandlePrecheckReport(msg.DeviceID, msg.Success, msg.Error)
 			}
 
 		default:

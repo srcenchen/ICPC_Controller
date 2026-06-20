@@ -36,12 +36,13 @@ type CheckinConfig struct {
 // ServerSettings holds mutable server configuration that can be changed via the admin UI.
 // Changes are automatically persisted to the database.
 type ServerSettings struct {
-	mu             sync.RWMutex
-	settingsRepo   *data.SettingsRepo
-	HostnamePrefix string          `json:"hostname_prefix"`
-	Presets        []PresetCommand `json:"presets"`
-	NetworkRules   []NetworkRule   `json:"network_rules"`
-	CheckinCfg     CheckinConfig   `json:"checkin_config"`
+	mu                   sync.RWMutex
+	settingsRepo         *data.SettingsRepo
+	HostnamePrefix       string          `json:"hostname_prefix"`
+	Presets              []PresetCommand `json:"presets"`
+	NetworkRules         []NetworkRule   `json:"network_rules"`
+	CheckinCfg           CheckinConfig   `json:"checkin_config"`
+	ScreenMonitorEnabled bool            `json:"screen_monitor_enabled"`
 }
 
 // defaultPresets returns the built-in preset commands.
@@ -103,10 +104,11 @@ func defaultNetworkRules() []NetworkRule {
 
 // settings DB keys for persistence.
 const (
-	settingKeyHostnamePrefix = "hostname_prefix"
-	settingKeyPresets        = "presets"
-	settingKeyNetworkRules   = "network_rules"
-	settingKeyCheckinConfig  = "checkin_config"
+	settingKeyHostnamePrefix       = "hostname_prefix"
+	settingKeyPresets              = "presets"
+	settingKeyNetworkRules         = "network_rules"
+	settingKeyCheckinConfig        = "checkin_config"
+	settingKeyScreenMonitorEnabled = "screen_monitor_enabled"
 )
 
 // NewServerSettings creates a new ServerSettings, loading persisted values from the
@@ -124,6 +126,7 @@ func NewServerSettings(prefix string, repo *data.SettingsRepo) *ServerSettings {
 			PostCheckoutCmd: "shutdown -h +1",
 			PostCheckoutMsg: "签退成功，您的电脑将在1分钟后自动关机。",
 		},
+		ScreenMonitorEnabled: false,
 	}
 
 	// Load persisted values from DB, falling back to defaults.
@@ -157,6 +160,9 @@ func (s *ServerSettings) loadFromDB() {
 		if json.Unmarshal([]byte(raw), &cfg) == nil {
 			s.CheckinCfg = cfg
 		}
+	}
+	if raw, err := s.settingsRepo.Get(settingKeyScreenMonitorEnabled); err == nil && raw != "" {
+		s.ScreenMonitorEnabled = raw == "true"
 	}
 	log.Printf("[settings] loaded persisted settings from database")
 }
@@ -247,7 +253,32 @@ func (s *ServerSettings) Snapshot() ServerSettings {
 	copy(presets, s.Presets)
 	rules := make([]NetworkRule, len(s.NetworkRules))
 	copy(rules, s.NetworkRules)
-	return ServerSettings{HostnamePrefix: s.HostnamePrefix, Presets: presets, NetworkRules: rules, CheckinCfg: s.CheckinCfg}
+	return ServerSettings{
+		HostnamePrefix:       s.HostnamePrefix,
+		Presets:              presets,
+		NetworkRules:         rules,
+		CheckinCfg:           s.CheckinCfg,
+		ScreenMonitorEnabled: s.ScreenMonitorEnabled,
+	}
+}
+
+// GetScreenMonitorEnabled returns the current screen monitor enabled state.
+func (s *ServerSettings) GetScreenMonitorEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ScreenMonitorEnabled
+}
+
+// SetScreenMonitorEnabled updates the screen monitor enabled state and persists it to the database.
+func (s *ServerSettings) SetScreenMonitorEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ScreenMonitorEnabled = enabled
+	val := "false"
+	if enabled {
+		val = "true"
+	}
+	s.persist(settingKeyScreenMonitorEnabled, val)
 }
 
 // MarshalPresets serializes presets to JSON bytes.

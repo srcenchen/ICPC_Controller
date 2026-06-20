@@ -28,7 +28,8 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Update accepts partial settings updates (POST /api/settings).
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		HostnamePrefix *string `json:"hostname_prefix,omitempty"`
+		HostnamePrefix       *string `json:"hostname_prefix,omitempty"`
+		ScreenMonitorEnabled *bool   `json:"screen_monitor_enabled,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -46,6 +47,21 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.settings.SetHostnamePrefix(prefix)
+	}
+
+	if req.ScreenMonitorEnabled != nil {
+		h.settings.SetScreenMonitorEnabled(*req.ScreenMonitorEnabled)
+
+		// Broadcast updated screen monitor config to all connected clients.
+		cfgData, _ := json.Marshal(struct {
+			Type    string `json:"type"`
+			Enabled bool   `json:"enabled"`
+		}{
+			Type:    "screen_monitor_config",
+			Enabled: *req.ScreenMonitorEnabled,
+		})
+		cfgData = append(cfgData, '\n')
+		h.hub.BroadcastToClients(cfgData)
 	}
 
 	writeJSON(w, http.StatusOK, h.settings.Snapshot())

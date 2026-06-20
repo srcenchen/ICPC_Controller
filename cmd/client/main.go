@@ -23,6 +23,8 @@ import (
 
 	"ICPCRemoteControl/internal/model"
 
+	"go-silver-core/pkg/gosilver"
+
 	"github.com/creack/pty"
 )
 
@@ -133,6 +135,7 @@ func startCheckinServer() {
 	mux.HandleFunc("GET /api/info", handleCheckinInfo)
 	mux.HandleFunc("POST /api/checkin", handleCheckinSubmit)
 	mux.HandleFunc("POST /api/checkout", handleCheckoutSubmit)
+	mux.HandleFunc("GET /screen", handleScreenStream)
 
 	srv := &http.Server{
 		Addr:         ":8090",
@@ -473,20 +476,100 @@ func writeClientJSON(w http.ResponseWriter, status int, v interface{}) {
 
 // ---- Server Discovery ----
 
+func isPrivateOrLocalIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	// Check private IPv4 ranges (10.x.x.x, 172.16.x.x - 172.31.x.x, 192.168.x.x)
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 10 ||
+			(ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) ||
+			(ip4[0] == 192 && ip4[1] == 168)
+	}
+	// Check private IPv6 range (fc00::/7 unique local address)
+	return len(ip) == 16 && (ip[0]&0xfe == 0xfc)
+}
+
+func resolveMDNSviaSystem(hostname string) string {
+	// macOS fallback: dscacheutil
+	if out, err := exec.Command("dscacheutil", "-q", "host", "-a", "name", hostname).Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "ip_address:") {
+				ip := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "ip_address:"))
+				if isPrivateOrLocalIP(ip) {
+					log.Printf("[client] resolved %s to %s via dscacheutil", hostname, ip)
+					return ip
+				}
+			}
+		}
+	}
+
+	// Linux fallback: getent
+	if out, err := exec.Command("getent", "hosts", hostname).Output(); err == nil {
+		parts := strings.Fields(string(out))
+		if len(parts) > 0 && isPrivateOrLocalIP(parts[0]) {
+			log.Printf("[client] resolved %s to %s via getent", hostname, parts[0])
+			return parts[0]
+		}
+	}
+
+	return ""
+}
+
 func resolveServer(flagAddr string) (string, error) {
 	if flagAddr != "" {
 		return ensurePort(flagAddr), nil
 	}
+
+	// 1. 优先从本地 server 配置文件读取 IP (防 DNS 劫持污染)
+	// 同时考虑 sudo 执行情况，优先定位真实用户的 Home 目录
+	var possiblePaths []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		possiblePaths = append(possiblePaths, filepath.Join(home, serverFile))
+	}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		possiblePaths = append(possiblePaths, filepath.Join("/Users", sudoUser, serverFile))
+		possiblePaths = append(possiblePaths, filepath.Join("/home", sudoUser, serverFile))
+	}
+
+	for _, p := range possiblePaths {
+		data, err := os.ReadFile(p)
+		if err == nil {
+			content := strings.TrimSpace(string(data))
+			if content != "" {
+				log.Printf("[client] resolved server IP from config file %s: %s", p, content)
+				return ensurePort(content), nil
+			}
+		}
+	}
+
+	// 2. 如果 server 文件不存在，优先尝试调用系统自带的 mDNS 工具解析 (确保与系统的 ping 结果一致)
+	if sysIP := resolveMDNSviaSystem(serverDefaultURL); sysIP != "" {
+		return net.JoinHostPort(sysIP, serverPort), nil
+	}
+
+	// 3. 退回到 Go 的内置 LookupHost 解析并过滤掉非局域网污染 IP
 	addrs, _ := net.LookupHost(serverDefaultURL)
-	if len(addrs) > 0 {
-		return net.JoinHostPort(addrs[0], serverPort), nil
+	var localAddrs []string
+	for _, a := range addrs {
+		if isPrivateOrLocalIP(a) {
+			localAddrs = append(localAddrs, a)
+		} else {
+			log.Printf("[client] warning: ignoring non-local resolved IP %q for %s (possible DNS pollution)", a, serverDefaultURL)
+		}
 	}
-	home, _ := os.UserHomeDir()
-	data, _ := os.ReadFile(filepath.Join(home, serverFile))
-	if len(data) > 0 {
-		return ensurePort(strings.TrimSpace(string(data))), nil
+
+	if len(localAddrs) > 0 {
+		log.Printf("[client] mDNS lookup of %q returned: %v (selected: %s)", serverDefaultURL, addrs, localAddrs[0])
+		return net.JoinHostPort(localAddrs[0], serverPort), nil
 	}
-	return "", fmt.Errorf("cannot resolve server: mDNS lookup of %q failed and %s file is empty/missing", serverDefaultURL, filepath.Join(home, serverFile))
+
+	return "", fmt.Errorf("cannot resolve server: mDNS lookup of %q failed (resolved IP list %v has no valid local address) and config file is missing/empty (tried: %v)", serverDefaultURL, addrs, possiblePaths)
 }
 
 func ensurePort(addr string) string {
@@ -804,6 +887,37 @@ func connectAndServe(serverAddr string, storedID *int) error {
 			}
 			checkinMu.Unlock()
 
+		case "screen_monitor_config":
+			var msg struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[client] unmarshal screen_monitor_config: %v", err)
+				continue
+			}
+			setScreenCaptureEnabled(msg.Enabled)
+
+		case "distribute_start":
+			var msg model.DistributeStartMessage
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[client] unmarshal distribute_start: %v", err)
+				continue
+			}
+			go handleDistributeStart(send, &msg)
+
+		case "distribute_cancel":
+			go handleDistributeCancel()
+
+		case "distribute_precheck":
+			var msg struct {
+				ServerIP string `json:"server_ip"`
+			}
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[client] unmarshal distribute_precheck: %v", err)
+				continue
+			}
+			go handleDistributePrecheck(send, msg.ServerIP)
+
 		case "pong":
 		}
 	}
@@ -934,3 +1048,162 @@ func startTerminal(send chan<- []byte, msg *model.TerminalOpenMessage, mu *sync.
 
 	cmd.Wait()
 }
+
+var (
+	activeDistMu     sync.Mutex
+	activeDistClient *gosilver.Client
+)
+
+func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage) {
+	activeDistMu.Lock()
+	if activeDistClient != nil {
+		log.Println("[client-dist] stopping previous active download")
+		activeDistClient.CancelDownload()
+		activeDistClient = nil
+	}
+	activeDistMu.Unlock()
+
+	// Ensure save directory exists
+	if err := os.MkdirAll(msg.SaveDir, 0755); err != nil {
+		log.Printf("[client-dist] failed to create save dir: %v", err)
+		sendJSON(send, model.DistributeProgressMessage{
+			Type:     "distribute_progress",
+			TaskID:   msg.TaskID,
+			DeviceID: state.assignedID,
+			Status:   "failed",
+			Error:    err.Error(),
+		})
+		return
+	}
+
+	log.Printf("[client-dist] starting download from %s for %s", msg.SenderAddr, msg.FileName)
+	client := gosilver.NewClient(msg.SenderAddr, msg.SaveDir)
+
+	activeDistMu.Lock()
+	activeDistClient = client
+	activeDistMu.Unlock()
+
+	progressCh, err := client.StartDownload()
+	if err != nil {
+		log.Printf("[client-dist] failed to start download: %v", err)
+		sendJSON(send, model.DistributeProgressMessage{
+			Type:     "distribute_progress",
+			TaskID:   msg.TaskID,
+			DeviceID: state.assignedID,
+			Status:   "failed",
+			Error:    err.Error(),
+		})
+		activeDistMu.Lock()
+		if activeDistClient == client {
+			activeDistClient = nil
+		}
+		activeDistMu.Unlock()
+		return
+	}
+
+	go func(c *gosilver.Client, taskID string, postCmd string, saveDir string) {
+		var lastStatus string
+		for prog := range progressCh {
+			var errMsg string
+			if prog.Error != nil {
+				errMsg = prog.Error.Error()
+			}
+			lastStatus = prog.Status
+
+			sendJSON(send, model.DistributeProgressMessage{
+				Type:        "distribute_progress",
+				TaskID:      taskID,
+				DeviceID:    state.assignedID,
+				Downloaded:  prog.Downloaded,
+				TotalChunks: prog.TotalChunks,
+				Percentage:  prog.Percentage,
+				SpeedMbps:   prog.SpeedMbps,
+				Status:      prog.Status,
+				Error:       errMsg,
+			})
+		}
+
+		if lastStatus == "completed" && postCmd != "" {
+			log.Printf("[client-dist] executing post command: %s", postCmd)
+			
+			// Show temporary executing status in UI
+			sendJSON(send, model.DistributeProgressMessage{
+				Type:        "distribute_progress",
+				TaskID:      taskID,
+				DeviceID:    state.assignedID,
+				Downloaded:  100,
+				TotalChunks: 100,
+				Percentage:  100,
+				Status:      "downloading",
+				Error:       "正在执行后置命令...",
+			})
+
+			cmd := exec.Command("sh", "-c", postCmd)
+			cmd.Dir = saveDir
+			output, err := cmd.CombinedOutput()
+
+			if err != nil {
+				log.Printf("[client-dist] post command failed: %v, output: %s", err, string(output))
+				sendJSON(send, model.DistributeProgressMessage{
+					Type:        "distribute_progress",
+					TaskID:      taskID,
+					DeviceID:    state.assignedID,
+					Downloaded:  100,
+					TotalChunks: 100,
+					Percentage:  100,
+					Status:      "failed",
+					Error:       fmt.Sprintf("命令执行失败: %v\n输出: %s", err, string(output)),
+				})
+			} else {
+				log.Printf("[client-dist] post command succeeded")
+				sendJSON(send, model.DistributeProgressMessage{
+					Type:        "distribute_progress",
+					TaskID:      taskID,
+					DeviceID:    state.assignedID,
+					Downloaded:  100,
+					TotalChunks: 100,
+					Percentage:  100,
+					Status:      "completed",
+				})
+			}
+		}
+
+		activeDistMu.Lock()
+		if activeDistClient == c {
+			activeDistClient = nil
+		}
+		activeDistMu.Unlock()
+	}(client, msg.TaskID, msg.PostCmd, msg.SaveDir)
+}
+
+func handleDistributeCancel() {
+	activeDistMu.Lock()
+	if activeDistClient != nil {
+		log.Println("[client-dist] cancelling download by server request")
+		activeDistClient.CancelDownload()
+		activeDistClient = nil
+	}
+	activeDistMu.Unlock()
+}
+
+func handleDistributePrecheck(send chan<- []byte, serverIP string) {
+	addr := fmt.Sprintf("%s:48080", serverIP)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	var success bool
+	var errMsg string
+	if err != nil {
+		success = false
+		errMsg = err.Error()
+	} else {
+		success = true
+		conn.Close()
+	}
+
+	sendJSON(send, map[string]interface{}{
+		"type":      "distribute_precheck_response",
+		"device_id": state.assignedID,
+		"success":   success,
+		"error":     errMsg,
+	})
+}
+

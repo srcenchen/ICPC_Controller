@@ -1,0 +1,31 @@
+package server
+
+import (
+	"encoding/json"
+	"go-silver-core/internal/gsp_sdk/model"
+	"go-silver-core/internal/gsp_sdk/server/handle"
+	"net"
+)
+
+type HandlerFunc func(conn net.Conn, data []byte, tool handle.ToolSession)
+
+var Mux = map[string]HandlerFunc{
+	"getChunk":      handle.GetChunk,
+	"getFileStatus": handle.GetFileStatus,
+	"wantChunk":     handle.WantChunk,
+	"reportChunk":   handle.ReportChunk,
+	"peerReg":       handle.PeerReg,
+	"reportPeer":    handle.PeerReport,
+}
+
+func (s *Session) SenderOperation(conn net.Conn, payload []byte) error {
+	var baseJson model.BaseJson
+	err := json.Unmarshal(payload, &baseJson)
+	if err != nil {
+		return err
+	}
+	if handler, ok := Mux[baseJson.Operate]; ok {
+		handler(conn, payload, s)
+	}
+	return nil
+}

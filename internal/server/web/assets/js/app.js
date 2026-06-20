@@ -33,18 +33,29 @@ $(function() {
 
     // Restore last page from URL hash, or default to dashboard.
     var hash = location.hash.replace("#", "");
-    var validPages = ["dashboard", "devices", "checkin", "commands", "network", "broadcast", "settings"];
+    var validPages = ["dashboard", "devices", "checkin", "commands", "network", "broadcast", "settings", "screen", "distribute"];
     var startPage = validPages.indexOf(hash) >= 0 ? hash : "dashboard";
 
     connectAdminWS();
     navigateTo(startPage);
 });
 
+
+
 function navigateTo(page) {
     currentPage = page;
     location.hash = page;
     $(".nav-link").removeClass("active");
     $('.nav-link[data-page="' + page + '"]').addClass("active");
+
+    if (page !== "screen") {
+        $("#screen-monitor-container img").attr("src", "about:blank");
+        $("#screen-modal-overlay img").attr("src", "about:blank");
+        $("#screen-modal-overlay").remove();
+        if (typeof stopAllIOSLoops === "function") {
+            stopAllIOSLoops();
+        }
+    }
 
     switch (page) {
         case "dashboard": loadDashboard(); break;
@@ -54,6 +65,8 @@ function navigateTo(page) {
         case "broadcast": loadBroadcastAdmin(); break;
         case "checkin":   renderCheckinPage(); break;
         case "settings":  loadSettings(); break;
+        case "screen":    loadScreenMonitor(); break;
+        case "distribute": loadDistribute(); break;
     }
 }
 
@@ -97,6 +110,7 @@ function handleAdminEvent(msg) {
             if (currentPage === "devices") loadDevices();
             if (currentPage === "checkin") loadCheckin();
             if (currentPage === "network") loadNetwork();
+            if (currentPage === "screen" && typeof refreshScreenDevices === "function") refreshScreenDevices();
             // Update the device list on commands page if it's open.
             if (currentPage === "commands" && typeof allDevices !== "undefined") {
                 $.getJSON("/api/devices", function(devices) {
@@ -114,6 +128,12 @@ function handleAdminEvent(msg) {
             break;
         case "command_result":
             if (typeof handleCommandResult === "function") handleCommandResult(msg.data);
+            break;
+        case "distribute_progress_update":
+        case "distribute_task_finished":
+            if (currentPage === "distribute" && typeof handleDistributeEvent === "function") {
+                handleDistributeEvent(msg.event, msg.data);
+            }
             break;
     }
 }
@@ -140,9 +160,13 @@ function formatBytes(bytes) {
 }
 
 function escapeHtml(str) {
-    var div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
+    if (str === null || str === undefined) return "";
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
 function statusLabel(status) {

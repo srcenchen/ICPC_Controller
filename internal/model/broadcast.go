@@ -49,5 +49,6 @@ type BroadcastConfig struct {
 	CountdownTarget string `json:"countdown_target"`
 	BaseURL         string `json:"base_url"`
 	ReferenceWidth  string `json:"reference_width"`
-	SyncReset       string `json:"sync_reset"` // mode name to reset started_at
+	SyncReset       string `json:"sync_reset,omitempty"` // mode name to reset started_at
+	PushedState     string `json:"pushed_state"`
 }

@@ -59,11 +59,11 @@ function render() {
     $("#content").html(`
             <div id="bc-app-root">
                 <div id="bc-header"></div>
-                <div style="display:grid;grid-template-columns:250px 1fr;gap:12px;">
+                <div class="bc-editor-layout">
                     <div id="bc-sidebar"></div>
                     <div id="bc-main"></div>
                 </div>
-                <div id="bc-config" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px;"></div>
+                <div id="bc-config" class="bc-config-layout"></div>
             </div>
         `);
     startClock();
@@ -87,8 +87,13 @@ function updateUI() {
 }
 
 function renderHeaderHtml() {
-  let h = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">' +
-      '<h2 class="section-title" style="margin:0;">广播管理</h2>' +
+  let pushedMode = bcConfig.pushed_state || "";
+  let statusText = pushedMode 
+      ? ('<span class="badge badge-online" style="margin-left: 10px; font-size: 12px; vertical-align: middle;">已推送: ' + (pushedMode === 'before' ? '赛前' : pushedMode === 'contesting' ? '赛中' : '赛后') + '</span>') 
+      : '<span class="badge badge-offline" style="margin-left: 10px; font-size: 12px; vertical-align: middle;">未推送</span>';
+
+  let h = '<div class="page-header">' +
+      '<div style="display:flex;align-items:center;"><h2 class="section-title" style="margin:0;">广播管理</h2>' + statusText + '</div>' +
       '<div style="display:flex;gap:6px;">' +
       '<button class="btn btn-sm btn-outline" onclick="openPreview()">预览</button>' +
       '<button class="btn btn-sm btn-outline" onclick="syncReset()" title="复位同步时钟">复位</button>' +
@@ -486,9 +491,41 @@ function openPreview(){window.open("/broadcast/"+bcMode,"_blank");}
 function pushToDevices(){
   var base=bcConfig.base_url||"http://icpc-server.local:8082",url=base+"/broadcast/"+bcMode,cmd="full-firefox "+url;
   if(!confirm("向目标推送广播？\n命令: "+cmd))return;
-  // Reset sync clock before pushing so all clients start together.
-  $.ajax({url:"/api/broadcast/config",method:"PUT",contentType:"application/json",data:JSON.stringify({sync_reset:bcMode}),success:function(){execCmd(cmd);}});
+
+  var performPush = function() {
+    $.ajax({
+      url:"/api/broadcast/config",
+      method:"PUT",
+      contentType:"application/json",
+      data:JSON.stringify({sync_reset:bcMode, pushed_state:bcMode}),
+      success:function(){
+        execCmd(cmd);
+        loadBroadcastAdmin();
+      }
+    });
+  };
+
+  if (bcConfig.pushed_state) {
+    execCmd("full-firefox kill");
+    setTimeout(performPush, 500);
+  } else {
+    performPush();
+  }
 }
-function pushKillBroadcast(){var cmd="full-firefox kill";if(!confirm("关闭广播？"))return;execCmd(cmd);}
+
+function pushKillBroadcast(){
+  var cmd="full-firefox kill";
+  if(!confirm("关闭广播？"))return;
+  $.ajax({
+    url:"/api/broadcast/config",
+    method:"PUT",
+    contentType:"application/json",
+    data:JSON.stringify({pushed_state:""}),
+    success:function(){
+      execCmd(cmd);
+      loadBroadcastAdmin();
+    }
+  });
+}
 function execCmd(cmd){ var body={target_type:"broadcast",command:cmd}; $.ajax({url:"/api/commands",method:"POST",contentType:"application/json",data:JSON.stringify(body),success:function(){alert("已派发");}}); }
-function esc(s){var d=document.createElement("div");d.textContent=s||"";return d.innerHTML;}
+function esc(s){return escapeHtml(s);}

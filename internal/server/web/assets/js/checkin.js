@@ -74,7 +74,7 @@ function renderCheckinTable(devices) {
     }).join("");
 
     var html = '' +
-        '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">' +
+        '<div class="page-header">' +
             '<h2 class="section-title" style="margin:0;">设备签到列表</h2>' +
             '<div style="display:flex; gap:8px;">' +
                 '<a class="btn btn-sm" style="text-decoration:none; display:inline-flex; align-items:center;" href="/api/checkin/export" download>导出 Excel</a>' +

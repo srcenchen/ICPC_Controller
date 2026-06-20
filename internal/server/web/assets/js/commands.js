@@ -56,7 +56,7 @@ function renderCommandPage(devices) {
         '</div>' +
     '</div>' +
 
-    '<div style="display:flex; justify-content:space-between; align-items:center; margin:24px 0 16px;">' +
+    '<div class="page-header" style="margin-top:24px;">' +
         '<h2 class="section-title" style="margin:0;">命令历史</h2>' +
         '<button class="btn btn-danger btn-sm" onclick="clearCommandHistory()">清空历史</button>' +
     '</div>' +

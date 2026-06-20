@@ -11,13 +11,19 @@ function parseDeviceIP(localIP) {
         var ips = JSON.parse(localIP);
         if (Array.isArray(ips) && ips.length > 0) {
             for (var i = 0; i < ips.length; i++) {
-                if (ips[i].defaultRoute && ips[i].ipv4) return ips[i].ipv4;
+                if (ips[i].defaultRoute && ips[i].ipv4) {
+                    return ips[i].ipv4.split('/')[0];
+                }
             }
             for (var j = 0; j < ips.length; j++) {
-                if (ips[j].ipv4) return ips[j].ipv4;
+                if (ips[j].ipv4) {
+                    return ips[j].ipv4.split('/')[0];
+                }
             }
         }
-    } catch(e) { return localIP; }
+    } catch(e) { 
+        return localIP.split('/')[0]; 
+    }
     return '';
 }
 

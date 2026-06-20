@@ -27,7 +27,7 @@ function renderDevices(devices) {
         }).join("");
 
     var html = '' +
-        '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">' +
+        '<div class="page-header">' +
             '<h2 class="section-title" style="margin:0;">设备管理</h2>' +
             '<div style="display:flex; gap:8px;">' +
                 '<a class="btn btn-sm" style="text-decoration:none; display:inline-flex; align-items:center;" href="/api/devices/export" download>导出 Excel</a>' +

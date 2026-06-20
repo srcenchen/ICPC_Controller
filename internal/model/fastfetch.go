@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // FastFetchEntry is one element of the fastfetch --format json array.
@@ -196,6 +197,11 @@ func ParseFastFetch(raw []byte) (*Device, error) {
 		case "LocalIp":
 			var ips []FFLocalIPEntry
 			if json.Unmarshal(entry.Result, &ips) == nil {
+				for i, ipEntry := range ips {
+					if idx := strings.Index(ipEntry.IPv4, "/"); idx != -1 {
+						ips[i].IPv4 = ipEntry.IPv4[:idx]
+					}
+				}
 				ipJSON, _ := json.Marshal(ips)
 				d.LocalIP = string(ipJSON)
 			}

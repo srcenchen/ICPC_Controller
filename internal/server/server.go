@@ -43,6 +43,7 @@ type Config struct {
 	CheckinH    *service.CheckinHandler
 	BroadcastH  *service.BroadcastHandler
 	AuthH       *service.AuthHandler
+	DistributionH *service.DistributionHandler
 }
 
 // New creates a new Server.
@@ -111,6 +112,19 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("GET /api/broadcast/config/countdown", cfg.BroadcastH.GetCountdown)
 		mux.HandleFunc("GET /broadcast/fonts/{filename}", cfg.BroadcastH.ServeFont)
 		mux.HandleFunc("GET /broadcast/images/{filename}", cfg.BroadcastH.ServeImage)
+	}
+
+	if cfg.DistributionH != nil {
+		mux.HandleFunc("GET /api/distribution/files", cfg.DistributionH.ListFiles)
+		mux.HandleFunc("POST /api/distribution/upload", cfg.DistributionH.UploadFile)
+		mux.HandleFunc("POST /api/distribution/delete", cfg.DistributionH.DeleteFiles)
+		mux.HandleFunc("POST /api/distribution/clear", cfg.DistributionH.ClearFiles)
+		mux.HandleFunc("GET /api/distribution/status", cfg.DistributionH.GetStatus)
+		mux.HandleFunc("POST /api/distribution/start", cfg.DistributionH.StartTask)
+		mux.HandleFunc("POST /api/distribution/stop", cfg.DistributionH.StopTask)
+		mux.HandleFunc("POST /api/distribution/retry", cfg.DistributionH.RetryDevice)
+		mux.HandleFunc("POST /api/distribution/precheck", cfg.DistributionH.Precheck)
+		mux.HandleFunc("POST /api/distribution/reset", cfg.DistributionH.ResetTask)
 	}
 
 	mux.HandleFunc("GET /ws/broadcast", service.BroadcastWS.Serve)
