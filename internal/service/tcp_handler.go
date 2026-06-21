@@ -14,6 +14,7 @@ import (
 	"ICPCRemoteControl/internal/data"
 	"ICPCRemoteControl/internal/model"
 )
+
 const maxTCPConns = 5000
 
 // readTimeout is the maximum interval between messages from a client before the
@@ -23,24 +24,26 @@ const readTimeout = 30 * time.Second
 
 // TCPHandler handles TCP connections from contestant machines.
 type TCPHandler struct {
-	hub         *biz.Hub
-	deviceRepo  *data.DeviceRepo
-	commandRepo *data.CommandRepo
-	idAssigner  *biz.IDAssigner
-	dispatcher  *biz.CommandDispatcher
-	outputBuf   map[int64]string // command_id → accumulated streaming output
-	obMu        sync.Mutex
-	connCount   int
-	connMu      sync.Mutex
-	settings    *ServerSettings
+	hub           *biz.Hub
+	deviceRepo    *data.DeviceRepo
+	commandRepo   *data.CommandRepo
+	idAssigner    *biz.IDAssigner
+	dispatcher    *biz.CommandDispatcher
+	outputBuf     map[int64]string // command_id → accumulated streaming output
+	obMu          sync.Mutex
+	connCount     int
+	connMu        sync.Mutex
+	settings      *ServerSettings
+	broadcastRepo *data.BroadcastRepo
 }
 
-func NewTCPHandler(hub *biz.Hub, deviceRepo *data.DeviceRepo, commandRepo *data.CommandRepo, idAssigner *biz.IDAssigner, dispatcher *biz.CommandDispatcher, settings *ServerSettings) *TCPHandler {
+func NewTCPHandler(hub *biz.Hub, deviceRepo *data.DeviceRepo, commandRepo *data.CommandRepo, idAssigner *biz.IDAssigner, dispatcher *biz.CommandDispatcher, settings *ServerSettings, broadcastRepo *data.BroadcastRepo) *TCPHandler {
 	return &TCPHandler{
 		hub: hub, deviceRepo: deviceRepo, commandRepo: commandRepo,
 		idAssigner: idAssigner, dispatcher: dispatcher,
-		outputBuf: make(map[int64]string),
-		settings:  settings,
+		outputBuf:     make(map[int64]string),
+		settings:      settings,
+		broadcastRepo: broadcastRepo,
 	}
 }
 
@@ -286,6 +289,35 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 			}
 			TerminalHub.Broadcast(msg.SessionID, []byte("\x1b[31mSession closed\x1b[0m\r\n"))
 			TerminalHub.Close(msg.SessionID)
+
+		case "query_broadcast_state":
+			var msg model.BroadcastQueryMessage
+			if err := json.Unmarshal([]byte(line), &msg); err != nil {
+				log.Printf("[tcp] device %d: unmarshal query_broadcast_state: %v", assignedID, err)
+				continue
+			}
+			pushedState, _ := h.broadcastRepo.GetConfig("pushed_state")
+			baseURL, _ := h.broadcastRepo.GetConfig("base_url")
+			if baseURL == "" {
+				baseURL = "http://icpc-server.local:8082"
+			}
+			cmd := ""
+			if pushedState != "" {
+				cmd = fmt.Sprintf("full-firefox %s/broadcast/%s", baseURL, pushedState)
+			}
+			resp := model.BroadcastQueryResponse{
+				Type:          "query_broadcast_response",
+				CorrelationID: msg.CorrelationID,
+				PushedState:   pushedState,
+				BaseURL:       baseURL,
+				Command:       cmd,
+			}
+			respData, _ := json.Marshal(resp)
+			respData = append(respData, '\n')
+			select {
+			case clientConn.Send <- respData:
+			default:
+			}
 
 		case "query_checkin_config":
 			var msg model.CheckinConfigMessage

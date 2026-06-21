@@ -55,22 +55,22 @@ var (
 
 // clientState holds mutable state that the HTTP handler needs to access.
 type clientState struct {
-	mu               sync.Mutex
-	send             chan<- []byte
-	assignedID       int
-	hostname         string
-	macAddr          string
-	ipAddr           string
-	checkinStatus    int    // 0=未签到, 1=已签到, 2=已签退
-	studentName      string
-	studentNum       string
-	checkinTime      string
-	checkoutTime     string
-	welcomeText      string // from server config
-	warningText      string
-	postCheckinMsg   string
-	postCheckoutCmd  string
-	postCheckoutMsg  string
+	mu              sync.Mutex
+	send            chan<- []byte
+	assignedID      int
+	hostname        string
+	macAddr         string
+	ipAddr          string
+	checkinStatus   int // 0=未签到, 1=已签到, 2=已签退
+	studentName     string
+	studentNum      string
+	checkinTime     string
+	checkoutTime    string
+	welcomeText     string // from server config
+	warningText     string
+	postCheckinMsg  string
+	postCheckoutCmd string
+	postCheckoutMsg string
 }
 
 var state = &clientState{}
@@ -262,6 +262,16 @@ func fetchCheckinConfig(sendCh chan<- []byte) (welcome, warning, postCheckin, po
 	postCheckout = state.postCheckoutMsg
 	state.mu.Unlock()
 	return
+}
+
+// fetchBroadcastState queries the server for the current broadcast state.
+func fetchBroadcastState(sendCh chan<- []byte) {
+	if sendCh == nil {
+		return
+	}
+	sendJSONSafe(sendCh, model.BroadcastQueryMessage{
+		Type: "query_broadcast_state",
+	})
 }
 
 // fetchCheckinStatus queries the server for the current check-in status of this device.
@@ -724,10 +734,11 @@ func connectAndServe(serverAddr string, storedID *int) error {
 	sendJSON(send, sysInfo)
 	log.Println("[client] ready")
 
-	// Fetch checkin config and status immediately on connection to sync watermark and client state
+	// Fetch checkin config, status, and broadcast state immediately on connection to sync watermark and client state
 	go func() {
 		fetchCheckinConfig(send)
 		fetchCheckinStatus(send)
+		fetchBroadcastState(send)
 		updateWatermark()
 	}()
 
@@ -848,6 +859,24 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				delete(termSessions, msg.SessionID)
 			}
 			termMu.Unlock()
+
+		case "query_broadcast_response":
+			var resp model.BroadcastQueryResponse
+			if err := json.Unmarshal([]byte(line), &resp); err != nil {
+				log.Printf("[client] unmarshal query_broadcast_response: %v", err)
+				continue
+			}
+			if resp.Command != "" {
+				log.Printf("[client] applying initial broadcast command: %s", resp.Command)
+				cmd := exec.Command("sh", "-c", resp.Command)
+				if err := cmd.Start(); err != nil {
+					log.Printf("[client] failed to start broadcast command: %v", err)
+				} else {
+					go cmd.Wait()
+				}
+			} else {
+				log.Printf("[client] no active broadcast state on startup")
+			}
 
 		case "checkin_config":
 			var cfg model.CheckinConfigMessage
@@ -1125,7 +1154,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 
 		if lastStatus == "completed" && postCmd != "" {
 			log.Printf("[client-dist] executing post command: %s", postCmd)
-			
+
 			// Show temporary executing status in UI
 			sendJSON(send, model.DistributeProgressMessage{
 				Type:        "distribute_progress",
@@ -1206,4 +1235,3 @@ func handleDistributePrecheck(send chan<- []byte, serverIP string) {
 		"error":     errMsg,
 	})
 }
-

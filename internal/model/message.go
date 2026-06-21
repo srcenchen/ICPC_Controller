@@ -27,11 +27,11 @@ type CommandOutputMessage struct {
 
 // CommandResultMessage is sent when a command finishes.
 type CommandResultMessage struct {
-	Type       string `json:"type"` // "command_result"
-	CommandID  int64  `json:"command_id"`
-	Status     string `json:"status"`
+	Type        string `json:"type"` // "command_result"
+	CommandID   int64  `json:"command_id"`
+	Status      string `json:"status"`
 	ErrorOutput string `json:"error_output,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
+	DurationMS  int64  `json:"duration_ms"`
 }
 
 // TerminalOutputMessage sends terminal output to server.
@@ -188,4 +188,19 @@ type DistributeProgressMessage struct {
 	SpeedMbps   int64   `json:"speed_mbps"`
 	Status      string  `json:"status"` // "idle", "downloading", "completed", "failed", "cancelled"
 	Error       string  `json:"error,omitempty"`
+}
+
+// BroadcastQueryMessage (Client -> Server)
+type BroadcastQueryMessage struct {
+	Type          string `json:"type"` // "query_broadcast_state"
+	CorrelationID string `json:"correlation_id,omitempty"`
+}
+
+// BroadcastQueryResponse (Server -> Client)
+type BroadcastQueryResponse struct {
+	Type          string `json:"type"` // "query_broadcast_response"
+	CorrelationID string `json:"correlation_id,omitempty"`
+	PushedState   string `json:"pushed_state"` // e.g. "before", "contesting", "after", or ""
+	BaseURL       string `json:"base_url"`     // e.g. "http://icpc-server.local:8082"
+	Command       string `json:"command"`      // e.g. "full-firefox http://icpc-server.local:8082/broadcast/before"
 }

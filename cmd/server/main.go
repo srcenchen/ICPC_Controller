@@ -78,7 +78,7 @@ func main() {
 	distHandler := service.NewDistributionHandler(service.DistributionMgr)
 
 	// TCP handler for client connections.
-	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings)
+	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo)
 
 	// Start TCP listener in background.
 	go func() {
@@ -89,20 +89,20 @@ func main() {
 
 	// Start HTTP server.
 	cfg := server.Config{
-		Port:      *port,
-		BindIP:    bindIP,
-		DBPath:    *dbPath,
-		Avahi:     *avahi,
-		DeviceH:   deviceHandler,
-		CommandH:  commandHandler,
-		StatsH:    statsHandler,
-		AdminWSH:    adminWSHandler,
-		TerminalWSH: terminalWSH,
-		SettingsH:   settingsHandler,
-		NetworkH:    networkHandler,
-		CheckinH:    checkinHandler,
-		BroadcastH:  broadcastHandler,
-		AuthH:       authHandler,
+		Port:          *port,
+		BindIP:        bindIP,
+		DBPath:        *dbPath,
+		Avahi:         *avahi,
+		DeviceH:       deviceHandler,
+		CommandH:      commandHandler,
+		StatsH:        statsHandler,
+		AdminWSH:      adminWSHandler,
+		TerminalWSH:   terminalWSH,
+		SettingsH:     settingsHandler,
+		NetworkH:      networkHandler,
+		CheckinH:      checkinHandler,
+		BroadcastH:    broadcastHandler,
+		AuthH:         authHandler,
 		DistributionH: distHandler,
 	}
 
