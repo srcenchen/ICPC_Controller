@@ -17,11 +17,19 @@ var broadcastWSUpgrader = websocket.Upgrader{
 // BroadcastWSHub manages WebSocket connections from broadcast display pages.
 type BroadcastWSHub struct {
 	mu         sync.RWMutex
-	conns      map[string]map[*websocket.Conn]bool
+	conns      map[string]map[*wsConn]bool
 	carousel   map[string]chan struct{}
 	carouselMu sync.Mutex
 	// Carousel page provider (set by handler).
 	PageProvider func(mode string) []pageInfo
+	// SnapshotProvider returns full pages_updated payload for a mode (set by handler).
+	SnapshotProvider func(mode string) []byte
+}
+
+// wsConn wraps websocket.Conn with a write mutex (gorilla requires single writer).
+type wsConn struct {
+	c  *websocket.Conn
+	mu sync.Mutex
 }
 
 type pageInfo struct {
@@ -29,7 +37,7 @@ type pageInfo struct {
 }
 
 var BroadcastWS = &BroadcastWSHub{
-	conns:    make(map[string]map[*websocket.Conn]bool),
+	conns:    make(map[string]map[*wsConn]bool),
 	carousel: make(map[string]chan struct{}),
 }
 
@@ -67,7 +75,8 @@ func (h *BroadcastWSHub) runCarousel(mode string, stop chan struct{}) {
 	for {
 		if h.PageProvider == nil {
 			select {
-			case <-stop: return
+			case <-stop:
+				return
 			case <-time.After(time.Second):
 			}
 			continue
@@ -75,7 +84,8 @@ func (h *BroadcastWSHub) runCarousel(mode string, stop chan struct{}) {
 		pages := h.PageProvider(mode)
 		if len(pages) == 0 {
 			select {
-			case <-stop: return
+			case <-stop:
+				return
 			case <-time.After(2 * time.Second):
 			}
 			continue
@@ -113,24 +123,32 @@ func (h *BroadcastWSHub) Serve(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "before"
 	}
-	conn, err := broadcastWSUpgrader.Upgrade(w, r, nil)
+	raw, err := broadcastWSUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[broadcast-ws] upgrade: %v", err)
 		return
 	}
+	conn := &wsConn{c: raw}
 
 	h.mu.Lock()
 	if h.conns[mode] == nil {
-		h.conns[mode] = make(map[*websocket.Conn]bool)
+		h.conns[mode] = make(map[*wsConn]bool)
 	}
 	h.conns[mode][conn] = true
+	total := len(h.conns[mode])
 	h.mu.Unlock()
 
-	log.Printf("[broadcast-ws] mode=%s connected (%d total)", mode, len(h.conns[mode]))
+	log.Printf("[broadcast-ws] mode=%s connected (%d total)", mode, total)
 
-	// Send current pages immediately.
-	// The caller (BroadcastHandler) needs access but we use a callback/interface instead.
-	// For now just keep alive.
+	// Push current pages immediately so display is not blank.
+	if h.SnapshotProvider != nil {
+		if snap := h.SnapshotProvider(mode); len(snap) > 0 {
+			conn.mu.Lock()
+			_ = conn.c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.c.WriteMessage(websocket.TextMessage, snap)
+			conn.mu.Unlock()
+		}
+	}
 
 	defer func() {
 		h.mu.Lock()
@@ -141,14 +159,14 @@ func (h *BroadcastWSHub) Serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.mu.Unlock()
-		conn.Close()
+		conn.c.Close()
 		log.Printf("[broadcast-ws] mode=%s disconnected", mode)
 	}()
 
 	// Keep connection alive with ping/pong.
-	conn.SetReadDeadline(time.Now().Add(wsPongWait))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.c.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.c.SetPongHandler(func(string) error {
+		conn.c.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
 
@@ -161,8 +179,11 @@ func (h *BroadcastWSHub) Serve(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-pingTicker.C:
-				conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				conn.mu.Lock()
+				conn.c.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				err := conn.c.WriteMessage(websocket.PingMessage, nil)
+				conn.mu.Unlock()
+				if err != nil {
 					return
 				}
 			case <-done:
@@ -172,7 +193,7 @@ func (h *BroadcastWSHub) Serve(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for {
-		_, _, err := conn.ReadMessage()
+		_, _, err := conn.c.ReadMessage()
 		if err != nil {
 			break
 		}
@@ -185,23 +206,26 @@ func (h *BroadcastWSHub) Broadcast(mode string, msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for conn := range h.conns[mode] {
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+		conn.mu.Lock()
+		conn.c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		err := conn.c.WriteMessage(websocket.TextMessage, msg)
+		conn.mu.Unlock()
+		if err != nil {
 			log.Printf("[broadcast-ws] write error: %v", err)
 		}
 	}
 }
 
-// BroadcastAll sends to all modes.
+// BroadcastAll sends a message to all display connections of all modes.
 func (h *BroadcastWSHub) BroadcastAll(msg []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, conns := range h.conns {
 		for conn := range conns {
-			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-				log.Printf("[broadcast-ws] write error: %v", err)
-			}
+			conn.mu.Lock()
+			conn.c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			_ = conn.c.WriteMessage(websocket.TextMessage, msg)
+			conn.mu.Unlock()
 		}
 	}
 }

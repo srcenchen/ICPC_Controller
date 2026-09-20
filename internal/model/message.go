@@ -76,6 +76,30 @@ type PingMessage struct {
 	Type string `json:"type"` // "ping"
 }
 
+// HealthReportMessage carries periodic resource metrics from a client.
+// A value below zero means the metric is unavailable on that machine.
+type HealthReportMessage struct {
+	Type          string  `json:"type"` // "health_report"
+	CPUPct        float64 `json:"cpu_pct"`
+	MemPct        float64 `json:"mem_pct"`
+	DiskPct       float64 `json:"disk_pct"`
+	TempC         float64 `json:"temp_c"`
+	Load1         float64 `json:"load1"`
+	UptimeSec     int64   `json:"uptime_sec"`
+	ClientVersion string  `json:"client_version"`
+}
+
+// HealthEvent is pushed to admin browsers when a health report arrives.
+type HealthEvent struct {
+	AssignedID int     `json:"assigned_id"`
+	CPUPct     float64 `json:"cpu_pct"`
+	MemPct     float64 `json:"mem_pct"`
+	DiskPct    float64 `json:"disk_pct"`
+	TempC      float64 `json:"temp_c"`
+	Load1      float64 `json:"load1"`
+	Alert      string  `json:"alert,omitempty"`
+}
+
 // ---- Server -> Client ----
 
 type RegisterResponse struct {
@@ -142,6 +166,17 @@ type CheckinConfigMessage struct {
 
 type PongMessage struct {
 	Type string `json:"type"` // "pong"
+}
+
+// UpdateClientMessage tells a client to self-update from URL.
+type UpdateClientMessage struct {
+	Type string `json:"type"` // "update_client"
+	URL  string `json:"url"`
+}
+
+// RefreshSysInfoMessage forces the client to re-run fastfetch (spec cache bypass).
+type RefreshSysInfoMessage struct {
+	Type string `json:"type"` // "refresh_sysinfo"
 }
 
 // ---- Admin WebSocket (Server -> Browser) ----

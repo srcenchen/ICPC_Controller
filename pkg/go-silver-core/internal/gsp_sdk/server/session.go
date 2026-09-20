@@ -34,9 +34,9 @@ type Session struct {
 	chunkProvider chunk.FileChunk               // chunk块
 	memPool       *mempool.MemPool
 	queue         *queue2
-	isMain        bool                          // 是否为主发送端
-	done          chan struct{}                 // 关闭通道
-	uploadSem     chan struct{}                 // 并发上传限制 (限流信号量)
+	isMain        bool          // 是否为主发送端
+	done          chan struct{} // 关闭通道
+	uploadSem     chan struct{} // 并发上传限制 (限流信号量)
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {

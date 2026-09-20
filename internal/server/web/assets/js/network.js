@@ -24,17 +24,17 @@ function loadNetwork() {
 
 function renderNetworkPage() {
     var html = '' +
-        '<h2>网络屏蔽管理</h2>' +
+        '<div class="page-header"><h1>网络屏蔽管理</h1></div>' +
 
         // Rules section.
         '<div class="settings-card">' +
             '<h3>白名单规则</h3>' +
             '<p class="settings-desc">外网访问白名单：只有匹配以下规则的域名才能访问外网，其余全部拦截。支持 <code>DOMAIN-SUFFIX</code>（域名后缀）、<code>DOMAIN-KEYWORD</code>（关键字）、<code>DOMAIN</code>（完整域名）。</p>' +
             '<div id="rules-list"></div>' +
-            '<div style="margin-top:12px; display:flex; gap:8px;">' +
+            '<div class="btn-row" style="margin-top:12px">' +
                 '<button id="btn-add-rule" class="btn btn-outline">+ 添加规则</button>' +
                 '</div>' +
-            '<div id="rules-result" class="settings-result" style="margin-top:12px;"></div>' +
+            '<div id="rules-result" class="settings-result"></div>' +
         '</div>' +
 
         // Device selection.
@@ -45,16 +45,18 @@ function renderNetworkPage() {
         '</div>' +
 
         // Action buttons.
-        '<div class="settings-card" style="display:flex; gap:12px; align-items:center;">' +
-            '<button id="btn-apply" class="btn btn-danger">应用网络限制</button>' +
-            '<button id="btn-remove" class="btn btn-success">解除网络限制</button>' +
-            '<span id="action-result" style="font-size:13px; margin-left:8px;"></span>' +
+        '<div class="settings-card">' +
+            '<div class="btn-row">' +
+                '<button id="btn-apply" class="btn btn-danger">应用网络限制</button>' +
+                '<button id="btn-remove" class="btn btn-success">解除网络限制</button>' +
+                '<span id="action-result" class="hint"></span>' +
+            '</div>' +
         '</div>' +
 
         // Log area.
         '<div class="settings-card">' +
             '<h3>执行日志</h3>' +
-            '<div id="network-log" class="command-output" style="max-height:300px; overflow:auto;">等待操作...</div>' +
+            '<div id="network-log" class="command-output md">等待操作...</div>' +
         '</div>';
 
     $("#content").html(html);
@@ -70,11 +72,11 @@ function renderRules() {
         $("#rules-list").html('<div class="empty-state" style="padding:24px">暂无规则，点击"+ 添加规则"创建</div>');
         return;
     }
-    var html = '<div class="presets-table">';
-    html += '<div class="preset-header"><span>类型</span><span>值</span><span></span></div>';
+    var html = '<div class="rules-editor">';
+    html += '<div class="rule-header"><span>类型</span><span>值</span><span></span></div>';
     for (var i = 0; i < networkRules.length; i++) {
         var r = networkRules[i];
-        html += '<div class="preset-row" data-index="' + i + '">' +
+        html += '<div class="rule-row" data-index="' + i + '">' +
             renderTypeSelect(r.type) +
             '<input type="text" class="rule-value" value="' + escapeHtml(r.value) + '" placeholder="例如: baidu.com">' +
             '<div class="preset-actions">' +
@@ -91,7 +93,7 @@ function renderRules() {
     });
 
     $("#rules-list .btn-delete").on("click", function() {
-        var idx = $(this).closest(".preset-row").data("index");
+        var idx = $(this).closest(".rule-row").data("index");
         networkRules.splice(idx, 1);
         renderRules();
         autoSaveRules();
@@ -100,7 +102,7 @@ function renderRules() {
 
 function autoSaveRules() {
     var updated = [];
-    $("#rules-list .preset-row").each(function() {
+    $("#rules-list .rule-row").each(function() {
         var v = $(this).find(".rule-value").val().trim();
         if (v) {
             updated.push({

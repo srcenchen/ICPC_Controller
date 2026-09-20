@@ -7,7 +7,6 @@ import (
 	"image/draw"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,18 +28,11 @@ var (
 	watermarkTriggerCh = make(chan struct{}, 1)
 )
 
-func findDisplay() string {
-	if disp := os.Getenv("DISPLAY"); disp != "" {
-		return disp
-	}
-	if files, err := filepath.Glob("/tmp/.X11-unix/X*"); err == nil && len(files) > 0 {
-		name := filepath.Base(files[0])
-		if len(name) > 1 && name[0] == 'X' {
-			return ":" + name[1:]
-		}
-	}
-	return ":0"
-}
+// findDisplay / findXAuthority delegate to the shared x11env helpers so the
+// watermark and screen-capture paths agree and cache the same result.
+func findDisplay() string { return resolveDisplay() }
+
+func findXAuthority() string { return resolveXAuthority() }
 
 func stealXAuthorityFromProc() string {
 	files, err := os.ReadDir("/proc")
@@ -110,60 +102,6 @@ func stealXAuthorityFromProc() string {
 	return ""
 }
 
-func findXAuthority() string {
-	// 0. 优先从 /proc 进程中窃取活动 GUI 进程的 XAUTHORITY (支持 root 降权运行与 X11 凭证窃取)
-	if stolen := stealXAuthorityFromProc(); stolen != "" {
-		return stolen
-	}
-
-	if xauth := os.Getenv("XAUTHORITY"); xauth != "" {
-		if _, err := os.Stat(xauth); err == nil {
-			return xauth
-		}
-	}
-
-	if files, err := filepath.Glob("/home/*/.Xauthority"); err == nil {
-		for _, f := range files {
-			if _, err := os.Stat(f); err == nil {
-				return f
-			}
-		}
-	}
-
-	if files, err := filepath.Glob("/run/user/*/xauth_*"); err == nil {
-		for _, f := range files {
-			if _, err := os.Stat(f); err == nil {
-				return f
-			}
-		}
-	}
-
-	if os.Geteuid() == 0 {
-		cmd := exec.Command("loginctl", "list-sessions", "--no-legend")
-		if out, err := cmd.Output(); err == nil {
-			lines := strings.Split(string(out), "\n")
-			for _, line := range lines {
-				fields := strings.Fields(line)
-				if len(fields) >= 3 {
-					username := fields[2]
-					if username != "" && username != "root" {
-						xauthPath := filepath.Join("/home", username, ".Xauthority")
-						if _, err := os.Stat(xauthPath); err == nil {
-							return xauthPath
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if _, err := os.Stat("/root/.Xauthority"); err == nil {
-		return "/root/.Xauthority"
-	}
-
-	return ""
-}
-
 func getFontFace(size float64) (font.Face, error) {
 	paths := []string{
 		// WenQuanYi MicroHei / ZenHei (very common on Debian/Ubuntu for Chinese)
@@ -219,7 +157,7 @@ func getWatermarkData() (string, string, string, string) {
 	defer state.mu.Unlock()
 
 	status := "在线"
-	if state.send == nil {
+	if state.sender == nil {
 		status = "离线"
 	}
 	name := state.studentName
@@ -476,24 +414,53 @@ func runWatermarkLoop() error {
 	wmPidAtom := getAtom(conn, "_NET_WM_PID")
 
 	curW, curH, curX, curY := 0, 0, 0, 0
+	// lastSig fingerprints everything that affects the rendered overlay. When it
+	// is unchanged we skip re-encoding + PutImage entirely — the previous
+	// unconditional 3s redraw burned CPU/X wakeups on idle machines.
+	lastSig := ""
+	lastActiveWin := uint32(0)
+	kioskCache := false
 
 	for {
-		isKiosk := false
 		activeWin, errProp := getWindowProperty32(conn, screen.Root, activeWinAtom)
-		if errProp == nil && activeWin != 0 {
-			pid := getWindowPID(conn, xproto.Window(activeWin), wmPidAtom, screen.Root)
-			if pid != 0 {
-				cmdline := getProcessCmdline(pid)
-				if strings.Contains(cmdline, "firefox") && strings.Contains(cmdline, "--kiosk") {
-					isKiosk = true
+		if errProp != nil {
+			activeWin = 0
+		}
+		// Only re-derive kiosk state (walk window tree + read /proc) when the
+		// focused window actually changed.
+		if activeWin != lastActiveWin {
+			lastActiveWin = activeWin
+			kioskCache = false
+			if activeWin != 0 {
+				pid := getWindowPID(conn, xproto.Window(activeWin), wmPidAtom, screen.Root)
+				if pid != 0 {
+					cmdline := getProcessCmdline(pid)
+					if strings.Contains(cmdline, "firefox") && strings.Contains(cmdline, "--kiosk") {
+						kioskCache = true
+					}
 				}
 			}
 		}
+		isKiosk := kioskCache
 
+		// Keep the overlay mapped and on top every iteration (cheap, and other
+		// windows may have raised themselves above it).
 		xproto.MapWindow(conn, win)
 		xproto.ConfigureWindow(conn, win, xproto.ConfigWindowStackMode, []uint32{xproto.StackModeAbove})
 
 		host, ip, userStr, statusVal := getWatermarkData()
+
+		sig := fmt.Sprintf("%s|%s|%s|%s|%v|%dx%d", host, ip, userStr, statusVal, isKiosk, ws, hs)
+		if sig == lastSig {
+			// Nothing changed — wait for the next trigger or fallback tick
+			// without touching the framebuffer.
+			select {
+			case <-watermarkTriggerCh:
+			case <-time.After(30 * time.Second):
+			}
+			continue
+		}
+		lastSig = sig
 
 		// Calculate target dimensions
 		targetW, targetH, targetX, targetY := 250, 78, ws-250-3, hs-78-50
@@ -574,6 +541,8 @@ func runWatermarkLoop() error {
 		xproto.PutImage(conn, xproto.ImageFormatZPixmap, xproto.Drawable(win), gc,
 			uint16(targetW), uint16(targetH), 0, 0, 0, depth, bgraData)
 
+		// A short wait after an actual redraw keeps the focus/kiosk transition
+		// responsive; steady state falls back to the 30s path above.
 		select {
 		case <-watermarkTriggerCh:
 		case <-time.After(3 * time.Second):

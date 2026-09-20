@@ -50,19 +50,29 @@ func main() {
 	deviceRepo := data.NewDeviceRepo(db)
 	commandRepo := data.NewCommandRepo(db)
 	settingsRepo := data.NewSettingsRepo(db)
+	eventRepo := data.NewDeviceEventRepo(db)
+	scheduleRepo := data.NewPowerScheduleRepo(db)
 
 	if err := deviceRepo.MarkAllOffline(); err != nil {
 		log.Printf("[main] warning: failed to mark devices offline: %v", err)
+	}
+	// Sweep placeholder rows left by clients that registered then dropped
+	// before reporting system info (crash-safety net for the deferred cleanup).
+	if n, err := deviceRepo.DeleteGhostRows(); err != nil {
+		log.Printf("[main] warning: ghost row sweep: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] removed %d incomplete device row(s)", n)
 	}
 
 	settings := service.NewServerSettings(*hostnamePrefix, settingsRepo)
 
 	idAssigner := biz.NewIDAssigner(deviceRepo)
 	hub := biz.NewHub(deviceRepo)
+	hub.SetEventRepo(eventRepo)
 	dispatcher := biz.NewCommandDispatcher(hub, commandRepo)
 
 	// HTTP + Admin WS.
-	deviceHandler := service.NewDeviceHandler(deviceRepo, hub)
+	deviceHandler := service.NewDeviceHandler(deviceRepo, hub, eventRepo)
 	commandHandler := service.NewCommandHandler(commandRepo, dispatcher, hub, settings)
 	statsHandler := service.NewStatsHandler(deviceRepo, commandRepo)
 	adminWSHandler := service.NewAdminWSHandler(hub)
@@ -75,10 +85,32 @@ func main() {
 	authHandler := service.NewAuthHandler(settings)
 
 	service.DistributionMgr = service.NewDistributionManager(hub, "data/uploads")
+	service.DistributionMgr.SetHostnameLookup(func(deviceID int) string {
+		d, err := deviceRepo.GetByAssignedID(deviceID)
+		if err != nil || d == nil {
+			return ""
+		}
+		if d.Hostname != "" {
+			return d.Hostname
+		}
+		if d.StudentName != "" {
+			return d.StudentName
+		}
+		return ""
+	})
 	distHandler := service.NewDistributionHandler(service.DistributionMgr)
+	screenProxyH := service.NewScreenProxyHandler(deviceRepo)
+
+	powerHandler := service.NewPowerHandler(deviceRepo, dispatcher, scheduleRepo, hub, settings)
+	installHandler := service.NewInstallHandler("data/uploads", *tcpPort, hub)
 
 	// TCP handler for client connections.
-	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo)
+	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo, eventRepo)
+
+	// Background janitor: log retention, ghost rows, scheduled power actions.
+	janitor := biz.NewJanitor(commandRepo, deviceRepo, eventRepo, scheduleRepo, settings, powerHandler)
+	janitor.Start()
+	defer janitor.Stop()
 
 	// Start TCP listener in background.
 	go func() {
@@ -104,6 +136,9 @@ func main() {
 		BroadcastH:    broadcastHandler,
 		AuthH:         authHandler,
 		DistributionH: distHandler,
+		ScreenProxyH:  screenProxyH,
+		PowerH:        powerHandler,
+		InstallH:      installHandler,
 	}
 
 	srv := server.New(cfg)

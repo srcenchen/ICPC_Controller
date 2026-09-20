@@ -1,0 +1,21 @@
+# ICPC Remote Control client (选手机). Runs as root — required for input-device
+# control, screen capture and the watermark overlay. Generic systemd unit (not
+# Arch-specific), though the fleet in practice is Arch + KDE.
+#
+# The one-line installer (curl -fsSL http://icpc-server.local:8080/install.sh | sudo bash)
+# writes this unit automatically; this file is the reference/manual copy.
+
+[Unit]
+Description=ICPC Remote Control Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/icpc-client --server icpc-server.local
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

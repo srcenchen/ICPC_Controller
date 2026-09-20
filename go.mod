@@ -36,4 +36,3 @@ require (
 require go-silver-core v0.0.0
 
 replace go-silver-core => ./pkg/go-silver-core
-

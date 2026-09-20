@@ -74,7 +74,7 @@ func (h *NetworkHandler) Apply(w http.ResponseWriter, r *http.Request) {
 
 	command := buildApplyCommand(h.settings.GetNetworkRules())
 
-	cmd := h.dispatch(req.TargetType, req.TargetID, command)
+	cmd := h.dispatch(req.TargetType, req.TargetID, command, "admin@"+getClientIP(r))
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
@@ -96,16 +96,17 @@ func (h *NetworkHandler) Remove(w http.ResponseWriter, r *http.Request) {
 
 	command := buildRemoveCommand()
 
-	cmd := h.dispatch(req.TargetType, req.TargetID, command)
+	cmd := h.dispatch(req.TargetType, req.TargetID, command, "admin@"+getClientIP(r))
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
-func (h *NetworkHandler) dispatch(targetType string, targetID *int, command string) *model.CommandLog {
+func (h *NetworkHandler) dispatch(targetType string, targetID *int, command, executedBy string) *model.CommandLog {
 	cmd := &model.CommandLog{
 		TargetType: targetType,
 		TargetID:   targetID,
 		Command:    command,
 		Status:     model.CommandStatusDispatched,
+		ExecutedBy: executedBy,
 	}
 	if err := h.repo.Create(cmd); err != nil {
 		return cmd

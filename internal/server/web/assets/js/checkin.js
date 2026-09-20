@@ -52,8 +52,8 @@ function renderCheckinTable(devices) {
         } else if (d.checkin_status === 1) {
             statusHtml = '<span class="badge badge-online">已签到</span>';
             actionHtml = '' +
-                '<button class="btn btn-sm btn-primary" style="margin-right:4px;" onclick="showSwapModal(' + d.assigned_id + ')">换设备</button>' +
-                '<button class="btn btn-sm btn-primary" style="margin-right:4px; background: var(--warning);" onclick="doCheckout(' + d.assigned_id + ')">签退</button>' +
+                '<button class="btn btn-sm btn-secondary" style="margin-right:4px;" onclick="showSwapModal(' + d.assigned_id + ')">换设备</button>' +
+                '<button class="btn btn-sm btn-warning" style="margin-right:4px;" onclick="doCheckout(' + d.assigned_id + ')">签退</button>' +
                 '<button class="btn btn-sm btn-danger" onclick="doResetCheckin(' + d.assigned_id + ')">解除</button>';
         } else if (d.checkin_status === 2) {
             statusHtml = '<span class="badge badge-pending">已签退</span>';
@@ -62,14 +62,14 @@ function renderCheckinTable(devices) {
                 '<button class="btn btn-sm btn-danger" onclick="doResetCheckin(' + d.assigned_id + ')">撤销</button>';
         }
 
-        return '<tr>' +
+        return '<tr data-device-id="' + d.assigned_id + '">' +
             '<td><strong>#' + d.assigned_id + '</strong></td>' +
-            '<td>' + escapeHtml(d.hostname) + '</td>' +
-            '<td>' + escapeHtml(d.student_name || '-') + '</td>' +
-            '<td>' + escapeHtml(d.student_num || '-') + '</td>' +
-            '<td>' + statusHtml + '</td>' +
-            '<td style="font-size:12px;">' + (d.connected ? '<span class="device-status-dot online"></span>在线' : '<span class="device-status-dot"></span>离线') + '</td>' +
-            '<td>' + actionHtml + '</td>' +
+            '<td class="col-hostname">' + escapeHtml(d.hostname) + '</td>' +
+            '<td class="col-student-name">' + escapeHtml(d.student_name || '-') + '</td>' +
+            '<td class="col-student-num">' + escapeHtml(d.student_num || '-') + '</td>' +
+            '<td class="col-checkin-status">' + statusHtml + '</td>' +
+            '<td class="col-online" style="font-size:12px;">' + (d.connected ? '<span class="device-status-dot online"></span>在线' : '<span class="device-status-dot"></span>离线') + '</td>' +
+            '<td class="col-actions">' + actionHtml + '</td>' +
             '</tr>';
     }).join("");
 
@@ -77,7 +77,7 @@ function renderCheckinTable(devices) {
         '<div class="page-header">' +
             '<h2 class="section-title" style="margin:0;">设备签到列表</h2>' +
             '<div style="display:flex; gap:8px;">' +
-                '<a class="btn btn-sm" style="text-decoration:none; display:inline-flex; align-items:center;" href="/api/checkin/export" download>导出 Excel</a>' +
+                '<a class="btn btn-sm btn-secondary" href="/api/checkin/export" download>导出 Excel</a>' +
                 '<button class="btn btn-sm btn-danger" onclick="doResetAllCheckin()">解除全部签到</button>' +
             '</div>' +
         '</div>' +
@@ -293,4 +293,17 @@ function renderCheckinPage() {
     $("#content").html(html);
     loadCheckin();
     updateStatusBar();
+}
+
+// Soft refresh for WS events — keep open modals when possible.
+function patchCheckinFromEvent(msg) {
+    if (currentPage !== "checkin") return;
+    // If a modal form is open, only refresh stats numbers.
+    if ($("#checkin-modal-container .modal-overlay").length) {
+        $.getJSON("/api/checkin/stats", function(stats) {
+            renderCheckinStats(stats);
+        });
+        return;
+    }
+    loadCheckin();
 }

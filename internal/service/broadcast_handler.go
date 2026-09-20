@@ -48,6 +48,22 @@ func NewBroadcastHandler(repo *data.BroadcastRepo) *BroadcastHandler {
 		}
 		return infos
 	}
+	// Full snapshot for new display connections (so screens are not blank under auth).
+	BroadcastWS.SnapshotProvider = func(mode string) []byte {
+		pages, err := repo.GetPagesWithItems(mode)
+		if err != nil {
+			return nil
+		}
+		startedAt, _ := repo.GetConfig("broadcast_started_at_" + mode)
+		msg, _ := json.Marshal(map[string]interface{}{
+			"type":        "pages_updated",
+			"mode":        mode,
+			"pages":       pages,
+			"server_time": time.Now().Format(time.RFC3339Nano),
+			"started_at":  startedAt,
+		})
+		return msg
+	}
 	return h
 }
 
@@ -67,7 +83,7 @@ func (h *BroadcastHandler) ListPages(w http.ResponseWriter, r *http.Request) {
 	startedAt, _ := h.repo.GetConfig("broadcast_started_at_" + mode)
 	serverNow := time.Now().Format(time.RFC3339Nano)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"pages":      pages,
+		"pages":       pages,
 		"server_time": serverNow,
 		"started_at":  startedAt,
 	})
@@ -444,7 +460,7 @@ func (h *BroadcastHandler) GetCountdown(w http.ResponseWriter, r *http.Request) 
 
 // ServeFont serves a font file from disk.
 func (h *BroadcastHandler) ServeFont(w http.ResponseWriter, r *http.Request) {
-	filename := r.PathValue("filename")
+	filename := filepath.Base(r.PathValue("filename"))
 	ext := strings.ToLower(filepath.Ext(filename))
 	contentType := "application/octet-stream"
 	switch ext {
@@ -462,11 +478,10 @@ func (h *BroadcastHandler) ServeFont(w http.ResponseWriter, r *http.Request) {
 
 // ServeImage serves an uploaded image from disk.
 func (h *BroadcastHandler) ServeImage(w http.ResponseWriter, r *http.Request) {
-	filename := r.PathValue("filename")
+	filename := filepath.Base(r.PathValue("filename"))
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, r, filepath.Join(broadcastDataDir, "images", filename))
 }
-
 
 // pushToDisplayClients sends updated pages to all WebSocket display clients for a mode.
 func (h *BroadcastHandler) pushToDisplayClients(mode string) {
@@ -484,7 +499,6 @@ func (h *BroadcastHandler) pushToDisplayClients(mode string) {
 	})
 	BroadcastWS.Broadcast(mode, msg)
 }
-
 
 func (h *BroadcastHandler) pushSyncReset(mode string) {
 	startedAt, _ := h.repo.GetConfig("broadcast_started_at_" + mode)

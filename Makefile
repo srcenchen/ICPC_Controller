@@ -1,0 +1,29 @@
+GO ?= go
+VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
+.PHONY: build server client client-linux fmt vet test clean
+
+build: server client
+
+server:
+	$(GO) build -o server ./cmd/server
+
+# The client runs on Linux contestant machines; stamp the version for the
+# admin UI's "client version" column and self-update checks.
+client:
+	$(GO) build -ldflags "-X main.clientVersion=$(VERSION)" -o client ./cmd/client
+
+client-linux:
+	GOOS=linux GOARCH=amd64 $(GO) build -ldflags "-X main.clientVersion=$(VERSION)" -o client-linux ./cmd/client
+
+fmt:
+	gofmt -w .
+
+vet:
+	$(GO) vet ./...
+
+test:
+	$(GO) test ./...
+
+clean:
+	rm -f server client client-linux

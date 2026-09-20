@@ -38,6 +38,14 @@ type Device struct {
 	StudentNum       string `json:"student_num"`
 	CheckinTime      string `json:"checkin_time"`
 	CheckoutTime     string `json:"checkout_time"`
+	// Live health metrics from the client heartbeat (-1 = unknown/unsupported).
+	CPUPct        float64 `json:"cpu_pct"`
+	MemPct        float64 `json:"mem_pct"`
+	DiskPct       float64 `json:"disk_pct"`
+	TempC         float64 `json:"temp_c"`
+	Load1         float64 `json:"load1"`
+	HealthAt      string  `json:"health_at"`
+	ClientVersion string  `json:"client_version"`
 }
 
 // DeviceSummary is a lightweight view for list endpoints.
@@ -55,4 +63,11 @@ type DeviceSummary struct {
 	CheckinStatus int    `json:"checkin_status"`
 	StudentName   string `json:"student_name"`
 	StudentNum    string `json:"student_num"`
+	// Health metrics (-1 = unknown); surfaced in the device list / dashboard.
+	CPUPct   float64 `json:"cpu_pct"`
+	MemPct   float64 `json:"mem_pct"`
+	DiskPct  float64 `json:"disk_pct"`
+	TempC    float64 `json:"temp_c"`
+	Load1    float64 `json:"load1"`
+	HealthAt string  `json:"health_at"`
 }

@@ -2,13 +2,13 @@ package gosilver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	_const "go-silver-core/internal/const"
 	"go-silver-core/internal/gsp_sdk/client"
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/internal/gsp_sdk/server"
 	"go-silver-core/pkg/mempool"
-	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -46,28 +46,33 @@ func NewServer(addr string, filePath string) *Server {
 	}
 }
 
+// SetPeerSelectMode configures P2P peer filtering: "subnet" (default) or "all".
+func SetPeerSelectMode(mode string) {
+	server.SetPeerSelectMode(mode)
+}
+
 // Start 启动服务端并开始监听和分块
 func (s *Server) Start() error {
 	s.mp = mempool.NewMemPool(_const.ChunkSize)
 	s.session = server.NewGspSession(s.addr, s.mp)
-	
+
 	if err := s.session.Start(); err != nil {
 		return err
 	}
-	
+
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		s.session.Stop()
 		return err
 	}
 	s.file = f
-	
+
 	if err := s.session.BeSendMain(f); err != nil {
 		f.Close()
 		s.session.Stop()
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -90,10 +95,11 @@ type Client struct {
 	mp         *mempool.MemPool
 	session    *server.Session
 	file       *os.File
-	
+
 	mu         sync.Mutex
 	status     ProgressInfo
 	progressCh chan ProgressInfo
+	chClosed   bool
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 }
@@ -120,16 +126,19 @@ func (c *Client) StartDownload() (<-chan ProgressInfo, error) {
 		return nil, fmt.Errorf("download already in progress")
 	}
 
+	// Fresh progress channel per download so prior close does not break reuse.
+	c.progressCh = make(chan ProgressInfo, 100)
+	c.chClosed = false
 	c.status = ProgressInfo{
 		Status: "downloading",
 	}
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
-	
+
 	c.wg.Add(1)
 	go c.runDownload(ctx)
-	
+
 	return c.progressCh, nil
 }
 
@@ -151,47 +160,73 @@ func (c *Client) GetStatus() ProgressInfo {
 }
 
 func (c *Client) updateProgress(info ProgressInfo) {
+	c.mu.Lock()
+	ch := c.progressCh
+	closed := c.chClosed
+	c.mu.Unlock()
+	if closed || ch == nil {
+		return
+	}
 	select {
-	case c.progressCh <- info:
+	case ch <- info:
 	default:
 		// 如果通道满了，移除旧消息放入新消息，防止阻塞下载过程
 		select {
-		case <-c.progressCh:
+		case <-ch:
 		default:
 		}
 		select {
-		case c.progressCh <- info:
+		case ch <- info:
 		default:
 		}
 	}
 }
 
-func (c *Client) finishWithError(err error, contextMsg string) {
+func (c *Client) closeProgress() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.chClosed && c.progressCh != nil {
+		c.chClosed = true
+		close(c.progressCh)
+	}
+}
+
+func (c *Client) finishWithError(err error, contextMsg string) {
+	c.mu.Lock()
 	c.status.Status = "failed"
 	c.status.Error = fmt.Errorf("%s: %w", contextMsg, err)
-	c.updateProgress(c.status)
+	info := c.status
+	c.mu.Unlock()
+	c.updateProgress(info)
 }
 
 func (c *Client) finishCancelled() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.status.Status = "cancelled"
 	c.status.Error = context.Canceled
-	c.updateProgress(c.status)
+	info := c.status
+	c.mu.Unlock()
+	c.updateProgress(info)
 }
 
 func (c *Client) runDownload(ctx context.Context) {
 	defer c.wg.Done()
-	
+	defer c.closeProgress()
+
 	c.mp = mempool.NewMemPool(_const.ChunkSize)
-	
-	// 随机分配子节点端口
-	c.peerPort = rand.IntN(999) + 3000
-	c.session = server.NewGspSession(":"+strconv.Itoa(c.peerPort), c.mp)
-	if err := c.session.Start(); err != nil {
-		c.finishWithError(err, "failed to start peer server")
+
+	// 随机分配子节点端口，监听失败则重试几次
+	var startErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		c.peerPort = rand.IntN(999) + 3000
+		c.session = server.NewGspSession(":"+strconv.Itoa(c.peerPort), c.mp)
+		startErr = c.session.Start()
+		if startErr == nil {
+			break
+		}
+	}
+	if startErr != nil {
+		c.finishWithError(startErr, "failed to start peer server")
 		return
 	}
 	defer c.session.Stop()
@@ -212,8 +247,9 @@ func (c *Client) runDownload(ctx context.Context) {
 		}
 		c.mu.Lock()
 		c.status.Error = fmt.Errorf("正在重连服务端 (每5秒重试): %w", err)
-		c.updateProgress(c.status)
+		info := c.status
 		c.mu.Unlock()
+		c.updateProgress(info)
 		time.Sleep(5 * time.Second)
 	}
 
@@ -225,10 +261,24 @@ func (c *Client) runDownload(ctx context.Context) {
 	if c.saveDir != "" {
 		fileName = filepath.Join(c.saveDir, fileName)
 	}
+	metaPath := fileName + ".icpc-chunks"
 
-	f, err := os.Create(fileName)
+	// Resume: open existing file if size matches; otherwise create fresh.
+	var f *os.File
+	var err error
+	doneSet := loadChunkMeta(metaPath)
+	if fi, statErr := os.Stat(fileName); statErr == nil && fi.Size() == status.FileSize {
+		f, err = os.OpenFile(fileName, os.O_RDWR, 0644)
+	} else {
+		doneSet = make(map[int64]bool)
+		_ = os.Remove(metaPath)
+		f, err = os.Create(fileName)
+		if err == nil {
+			err = f.Truncate(status.FileSize)
+		}
+	}
 	if err != nil {
-		c.finishWithError(err, "failed to create local file")
+		c.finishWithError(err, "failed to open local file")
 		return
 	}
 	c.file = f
@@ -237,21 +287,14 @@ func (c *Client) runDownload(ctx context.Context) {
 			_ = c.file.Close()
 			c.file = nil
 		}
-
 		c.mu.Lock()
 		statusStr := c.status.Status
 		c.mu.Unlock()
-
-		if statusStr != "completed" {
-			log.Printf("[gosilver] 下载未完成 (状态: %s)，清理半成品文件: %s", statusStr, fileName)
-			_ = os.Remove(fileName)
+		if statusStr == "completed" {
+			_ = os.Remove(metaPath)
 		}
+		// Keep partial file + meta for resume on failed/cancelled.
 	}()
-
-	if err := f.Truncate(status.FileSize); err != nil {
-		c.finishWithError(err, "failed to truncate file")
-		return
-	}
 
 	c.session.BeSendSub(f)
 	ck := c.session.GetChunk()
@@ -270,15 +313,32 @@ func (c *Client) runDownload(ctx context.Context) {
 		}
 		c.mu.Lock()
 		c.status.Error = fmt.Errorf("注册对端失败，正在重试 (每5秒重试): %w", err)
-		c.updateProgress(c.status)
+		info := c.status
 		c.mu.Unlock()
+		c.updateProgress(info)
 		time.Sleep(5 * time.Second)
 	}
 
-	// 准备分块索引
-	indices := make([]int64, status.ChunkNum)
-	for i := range indices {
-		indices[i] = int64(i)
+	// 准备分块索引（跳过已完成，支持断点续传）
+	var indices []int64
+	var downloadedCount int64
+	for i := int64(0); i < status.ChunkNum; i++ {
+		if doneSet[i] {
+			// Re-register owned chunk for P2P serving (checksum 0 is fine for ownership).
+			c.session.AddChunk(i, 0)
+			_ = gspC.ReportChunk(c.session.UUID, i)
+			downloadedCount++
+			continue
+		}
+		indices = append(indices, i)
+	}
+	if status.ChunkNum > 0 {
+		c.mu.Lock()
+		c.status.Downloaded = downloadedCount
+		c.status.Percentage = float64(downloadedCount) / float64(status.ChunkNum) * 100
+		info := c.status
+		c.mu.Unlock()
+		c.updateProgress(info)
 	}
 
 	// 打乱顺序，优化局域网 P2P
@@ -286,11 +346,10 @@ func (c *Client) runDownload(ctx context.Context) {
 		indices[i], indices[j] = indices[j], indices[i]
 	})
 
-	var downloadedCount int64
-
 	for len(indices) > 0 {
 		select {
 		case <-ctx.Done():
+			saveChunkMeta(metaPath, doneSet)
 			c.finishCancelled()
 			return
 		default:
@@ -304,8 +363,7 @@ func (c *Client) runDownload(ctx context.Context) {
 		for _, idx := range indices {
 			select {
 			case <-ctx.Done():
-				c.finishCancelled()
-				return
+				// drain workers
 			default:
 			}
 
@@ -318,6 +376,9 @@ func (c *Client) runDownload(ctx context.Context) {
 
 				select {
 				case <-ctx.Done():
+					mu.Lock()
+					failedList = append(failedList, i)
+					mu.Unlock()
 					return
 				default:
 				}
@@ -358,6 +419,10 @@ func (c *Client) runDownload(ctx context.Context) {
 				_ = gspC.ReportChunk(c.session.UUID, i)
 				_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, speedMbps, "done")
 
+				mu.Lock()
+				doneSet[i] = true
+				mu.Unlock()
+
 				c.mu.Lock()
 				downloadedCount++
 				c.status.Downloaded = downloadedCount
@@ -365,14 +430,16 @@ func (c *Client) runDownload(ctx context.Context) {
 					c.status.Percentage = float64(downloadedCount) / float64(status.ChunkNum) * 100
 				}
 				c.status.SpeedMbps = speedMbps
-				c.updateProgress(c.status)
+				info := c.status
 				c.mu.Unlock()
+				c.updateProgress(info)
 			}(idx)
 		}
 		wg.Wait()
 
 		select {
 		case <-ctx.Done():
+			saveChunkMeta(metaPath, doneSet)
 			c.finishCancelled()
 			return
 		default:
@@ -382,6 +449,7 @@ func (c *Client) runDownload(ctx context.Context) {
 			if len(failedList) == len(indices) {
 				select {
 				case <-ctx.Done():
+					saveChunkMeta(metaPath, doneSet)
 					c.finishCancelled()
 					return
 				case <-time.After(5 * time.Second):
@@ -390,6 +458,8 @@ func (c *Client) runDownload(ctx context.Context) {
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
+		// Persist progress for resume
+		saveChunkMeta(metaPath, doneSet)
 		indices = failedList
 	}
 
@@ -397,6 +467,35 @@ func (c *Client) runDownload(ctx context.Context) {
 	c.status.Status = "completed"
 	c.status.Percentage = 100.0
 	c.status.SpeedMbps = 0
-	c.updateProgress(c.status)
+	info := c.status
 	c.mu.Unlock()
+	c.updateProgress(info)
+}
+
+func loadChunkMeta(path string) map[int64]bool {
+	set := make(map[int64]bool)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return set
+	}
+	var ids []int64
+	if json.Unmarshal(data, &ids) != nil {
+		return set
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
+func saveChunkMeta(path string, set map[int64]bool) {
+	ids := make([]int64, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0644)
 }

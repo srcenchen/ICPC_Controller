@@ -112,7 +112,6 @@ func (h *CheckinHandler) DoRestoreCheckout(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{"message": "restore checkin success"})
 }
 
-
 // Reset resets a device's check-in status (POST /api/checkin/{id}/reset).
 func (h *CheckinHandler) Reset(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -139,7 +138,7 @@ func (h *CheckinHandler) ResetAll(w http.ResponseWriter, r *http.Request) {
 	}
 	h.broadcastCheckinUpdated(0) // 0 = all devices affected
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"message":       "all checkins reset",
+		"message":        "all checkins reset",
 		"affected_count": n,
 	})
 }

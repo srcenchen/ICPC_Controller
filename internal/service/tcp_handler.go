@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,23 @@ const maxTCPConns = 5000
 // Combined with TCP keepalive (5s probes), dead connections are detected quickly.
 const readTimeout = 30 * time.Second
 
+// Command output is accumulated in memory and flushed to the DB at most once
+// per outputFlushInterval. Writing the whole accumulated string on every line
+// (the previous behaviour) is O(n²) for chatty commands.
+const (
+	outputFlushInterval = time.Second
+	maxOutputBytes      = 256 * 1024
+	outputTruncMarker   = "\n… [输出超过 256KB，已截断] …\n"
+)
+
+// cmdOutput is the in-memory buffer for one running command.
+type cmdOutput struct {
+	buf       []byte
+	truncated bool
+	dirty     bool
+	lastFlush time.Time
+}
+
 // TCPHandler handles TCP connections from contestant machines.
 type TCPHandler struct {
 	hub           *biz.Hub
@@ -29,22 +47,93 @@ type TCPHandler struct {
 	commandRepo   *data.CommandRepo
 	idAssigner    *biz.IDAssigner
 	dispatcher    *biz.CommandDispatcher
-	outputBuf     map[int64]string // command_id → accumulated streaming output
+	outputBuf     map[int64]*cmdOutput // command_id → accumulated streaming output
 	obMu          sync.Mutex
 	connCount     int
 	connMu        sync.Mutex
 	settings      *ServerSettings
 	broadcastRepo *data.BroadcastRepo
+	eventRepo     *data.DeviceEventRepo
 }
 
-func NewTCPHandler(hub *biz.Hub, deviceRepo *data.DeviceRepo, commandRepo *data.CommandRepo, idAssigner *biz.IDAssigner, dispatcher *biz.CommandDispatcher, settings *ServerSettings, broadcastRepo *data.BroadcastRepo) *TCPHandler {
+func NewTCPHandler(hub *biz.Hub, deviceRepo *data.DeviceRepo, commandRepo *data.CommandRepo, idAssigner *biz.IDAssigner, dispatcher *biz.CommandDispatcher, settings *ServerSettings, broadcastRepo *data.BroadcastRepo, eventRepo *data.DeviceEventRepo) *TCPHandler {
 	return &TCPHandler{
 		hub: hub, deviceRepo: deviceRepo, commandRepo: commandRepo,
 		idAssigner: idAssigner, dispatcher: dispatcher,
-		outputBuf:     make(map[int64]string),
+		outputBuf:     make(map[int64]*cmdOutput),
 		settings:      settings,
 		broadcastRepo: broadcastRepo,
+		eventRepo:     eventRepo,
 	}
+}
+
+// appendOutput accumulates a line and reports whether the DB should be updated
+// now (throttled). The returned string is only valid when flush is true.
+func (h *TCPHandler) appendOutput(cmdID int64, line string) (out string, flush bool) {
+	h.obMu.Lock()
+	defer h.obMu.Unlock()
+	co, ok := h.outputBuf[cmdID]
+	if !ok {
+		co = &cmdOutput{}
+		h.outputBuf[cmdID] = co
+	}
+	if !co.truncated {
+		if len(co.buf)+len(line)+1 > maxOutputBytes {
+			co.buf = append(co.buf, outputTruncMarker...)
+			co.truncated = true
+		} else {
+			co.buf = append(co.buf, line...)
+			co.buf = append(co.buf, '\n')
+		}
+		co.dirty = true
+	}
+	if !co.dirty || time.Since(co.lastFlush) < outputFlushInterval {
+		return "", false
+	}
+	co.lastFlush = time.Now()
+	co.dirty = false
+	return string(co.buf), true
+}
+
+// takeOutput removes and returns the buffered output for a finished command.
+func (h *TCPHandler) takeOutput(cmdID int64) (string, bool) {
+	h.obMu.Lock()
+	defer h.obMu.Unlock()
+	co, ok := h.outputBuf[cmdID]
+	if !ok {
+		return "", false
+	}
+	delete(h.outputBuf, cmdID)
+	return string(co.buf), true
+}
+
+// healthAlert returns a human-readable alert when a metric crosses its
+// configured threshold, or "" when everything is within limits.
+func (h *TCPHandler) healthAlert(hr model.HealthReportMessage) string {
+	cfg := h.settings.GetMaintenance()
+	var alerts []string
+	if cfg.DiskAlertPct > 0 && hr.DiskPct >= cfg.DiskAlertPct {
+		alerts = append(alerts, fmt.Sprintf("磁盘 %.0f%%", hr.DiskPct))
+	}
+	if cfg.TempAlertC > 0 && hr.TempC >= cfg.TempAlertC {
+		alerts = append(alerts, fmt.Sprintf("温度 %.0f°C", hr.TempC))
+	}
+	if cfg.MemAlertPct > 0 && hr.MemPct >= cfg.MemAlertPct {
+		alerts = append(alerts, fmt.Sprintf("内存 %.0f%%", hr.MemPct))
+	}
+	if len(alerts) == 0 {
+		return ""
+	}
+	return strings.Join(alerts, " / ")
+}
+
+// dropOutputs discards buffers for commands abandoned by a disconnect.
+func (h *TCPHandler) dropOutputs(cmdIDs map[int64]bool) {
+	h.obMu.Lock()
+	for id := range cmdIDs {
+		delete(h.outputBuf, id)
+	}
+	h.obMu.Unlock()
 }
 
 func (h *TCPHandler) incConn() bool {
@@ -89,10 +178,26 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 	}
 
 	// Atomic ID assignment — prevents concurrent clients getting the same ID.
-	assignedID, existingDevice, err := h.idAssigner.AssignOrReuse(regReq.MacAddress, regReq.AssignedID)
+	assignedID, existingDevice, newlyAllocated, err := h.idAssigner.AssignOrReuseTracked(regReq.MacAddress, regReq.AssignedID)
 	if err != nil {
 		log.Printf("[tcp] id assignment error: %v", err)
 		return
+	}
+
+	// A fresh allocation inserts a placeholder row; drop it if this client
+	// disconnects before reporting system info (otherwise "pending" ghosts stay).
+	sysInfoReceived := false
+	if newlyAllocated {
+		defer func() {
+			if sysInfoReceived {
+				return
+			}
+			if err := h.deviceRepo.Delete(assignedID); err != nil {
+				log.Printf("[tcp] cleanup placeholder row #%d: %v", assignedID, err)
+			} else {
+				log.Printf("[tcp] removed placeholder row #%d (no system_info received)", assignedID)
+			}
+		}()
 	}
 
 	clientConn := &biz.ClientConn{
@@ -121,6 +226,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 	if err := json.Unmarshal([]byte(line), &sysMsg); err != nil || sysMsg.Type != "system_info" {
 		return
 	}
+	sysInfoReceived = true
 
 	rawJSON, _ := json.Marshal(sysMsg.Info)
 	device, err := model.ParseFastFetch(rawJSON)
@@ -193,6 +299,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 
 	// Track in-flight command IDs for this device so we can fail them on disconnect.
 	inFlightCmds := make(map[int64]bool)
+	lastClientVersion := ""
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -202,11 +309,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 				log.Printf("[tcp] device %d: read: %v", assignedID, err)
 			}
 			h.failInFlightCommands(inFlightCmds)
-			h.obMu.Lock()
-			for cmdID := range inFlightCmds {
-				delete(h.outputBuf, cmdID)
-			}
-			h.obMu.Unlock()
+			h.dropOutputs(inFlightCmds)
 			return
 		}
 
@@ -223,17 +326,15 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 				log.Printf("[tcp] device %d: unmarshal command_output: %v", assignedID, err)
 				continue
 			}
-			// Persist output to DB immediately so history works for running commands.
-			h.obMu.Lock()
-			h.outputBuf[msg.CommandID] += msg.Line + "\n"
-			buf := h.outputBuf[msg.CommandID]
-			h.obMu.Unlock()
 			inFlightCmds[msg.CommandID] = true
-			// Update DB with accumulated output (lightweight, just a string update).
-			if cmd, err := h.commandRepo.GetByID(msg.CommandID); err == nil {
-				cmd.Output = buf
-				h.commandRepo.UpdateStatus(cmd)
+			// Accumulate in memory; persist at most once per second so a chatty
+			// command doesn't rewrite its whole output on every line.
+			if buf, flush := h.appendOutput(msg.CommandID, msg.Line); flush {
+				if err := h.commandRepo.UpdateOutput(msg.CommandID, buf); err != nil {
+					log.Printf("[tcp] device %d: persist output for cmd %d: %v", assignedID, msg.CommandID, err)
+				}
 			}
+			// Live lines always go straight to admins (no DB involved).
 			h.hub.BroadcastAdminEvent("command_output", model.CommandOutputEvent{
 				CommandID: msg.CommandID,
 				DeviceID:  assignedID,
@@ -253,14 +354,13 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 				cmd.Status = cr.Status
 				cmd.ErrorOutput = cr.ErrorOutput
 				cmd.DurationMS = cr.DurationMS
-				// Final accumulated output is already in DB from command_output handlers.
-				h.obMu.Lock()
-				if buf, ok := h.outputBuf[cr.CommandID]; ok {
+				// Authoritative final write of the accumulated output.
+				if buf, ok := h.takeOutput(cr.CommandID); ok {
 					cmd.Output = buf
-					delete(h.outputBuf, cr.CommandID)
 				}
-				h.obMu.Unlock()
-				h.commandRepo.UpdateStatus(cmd)
+				if err := h.commandRepo.UpdateStatus(cmd); err != nil {
+					log.Printf("[tcp] device %d: persist result for cmd %d: %v", assignedID, cr.CommandID, err)
+				}
 				if cmd.ParentID != nil {
 					h.dispatcher.UpdateBroadcastParentStatus(*cmd.ParentID)
 				}
@@ -429,8 +529,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 			}
 
 			// Throttle database updates for last_seen to once every 60 seconds per client.
-			if time.Since(clientConn.LastSeenUpdated) > 60*time.Second {
-				clientConn.LastSeenUpdated = time.Now()
+			if clientConn.ShouldUpdateLastSeen(60 * time.Second) {
 				if err := h.deviceRepo.UpdateConnected(assignedID, true); err != nil {
 					log.Printf("[tcp] failed to update last_seen for device %d: %v", assignedID, err)
 				}
@@ -440,6 +539,40 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 					"connected":   true,
 				})
 			}
+
+		case "health_report":
+			var hr model.HealthReportMessage
+			if err := json.Unmarshal([]byte(line), &hr); err != nil {
+				log.Printf("[tcp] device %d: unmarshal health_report: %v", assignedID, err)
+				continue
+			}
+			if err := h.deviceRepo.UpdateHealth(assignedID, hr.CPUPct, hr.MemPct, hr.DiskPct, hr.TempC, hr.Load1); err != nil {
+				log.Printf("[tcp] device %d: persist health: %v", assignedID, err)
+			}
+			if hr.ClientVersion != "" && hr.ClientVersion != lastClientVersion {
+				lastClientVersion = hr.ClientVersion
+				if err := h.deviceRepo.UpdateClientVersion(assignedID, hr.ClientVersion); err != nil {
+					log.Printf("[tcp] device %d: persist client version: %v", assignedID, err)
+				}
+			}
+			ev := model.HealthEvent{
+				AssignedID: assignedID,
+				CPUPct:     hr.CPUPct,
+				MemPct:     hr.MemPct,
+				DiskPct:    hr.DiskPct,
+				TempC:      hr.TempC,
+				Load1:      hr.Load1,
+			}
+			ev.Alert = h.healthAlert(hr)
+			if ev.Alert != "" {
+				log.Printf("[tcp] device %d health alert: %s", assignedID, ev.Alert)
+				if h.eventRepo != nil {
+					if err := h.eventRepo.Add(assignedID, "alert", ev.Alert); err != nil {
+						log.Printf("[tcp] device %d: record alert: %v", assignedID, err)
+					}
+				}
+			}
+			h.hub.BroadcastAdminEvent("device_health", ev)
 
 		case "distribute_progress":
 			var msg model.DistributeProgressMessage

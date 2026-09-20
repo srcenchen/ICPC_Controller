@@ -24,7 +24,19 @@ func NewIDAssigner(repo *data.DeviceRepo) *IDAssigner {
 
 // AssignOrReuse atomically assigns an ID for a client, checking MAC and stored ID for reuse.
 // Returns the assigned ID and optionally an existing device record (from MAC match).
+// The third result reports whether a fresh placeholder row was inserted, so the
+// caller can delete it if the client never reports its system info.
 func (a *IDAssigner) AssignOrReuse(macAddress string, storedID *int) (assignedID int, existingDevice *model.Device, err error) {
+	id, dev, _, err := a.assignOrReuse(macAddress, storedID)
+	return id, dev, err
+}
+
+// AssignOrReuseTracked is AssignOrReuse plus the "newly allocated" flag.
+func (a *IDAssigner) AssignOrReuseTracked(macAddress string, storedID *int) (assignedID int, existingDevice *model.Device, newlyAllocated bool, err error) {
+	return a.assignOrReuse(macAddress, storedID)
+}
+
+func (a *IDAssigner) assignOrReuse(macAddress string, storedID *int) (assignedID int, existingDevice *model.Device, newlyAllocated bool, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -33,7 +45,7 @@ func (a *IDAssigner) AssignOrReuse(macAddress string, storedID *int) (assignedID
 		existing, err := a.repo.GetByMacAddress(macAddress)
 		if err == nil && existing != nil {
 			log.Printf("[id] MAC %s matched existing device #%d", macAddress, existing.AssignedID)
-			return existing.AssignedID, existing, nil
+			return existing.AssignedID, existing, false, nil
 		}
 	}
 
@@ -42,17 +54,17 @@ func (a *IDAssigner) AssignOrReuse(macAddress string, storedID *int) (assignedID
 		dev, err := a.repo.GetByAssignedID(*storedID)
 		if err == nil && !dev.Connected {
 			log.Printf("[id] reusing stored ID %d", *storedID)
-			return *storedID, nil, nil
+			return *storedID, nil, false, nil
 		}
 	}
 
 	// 3. Allocate a new ID atomically: SELECT MAX+1 and INSERT placeholder immediately.
 	id, err := a.allocateNew()
 	if err != nil {
-		return 0, nil, fmt.Errorf("allocate id: %w", err)
+		return 0, nil, false, fmt.Errorf("allocate id: %w", err)
 	}
 	log.Printf("[id] assigned new ID %d", id)
-	return id, nil, nil
+	return id, nil, true, nil
 }
 
 // allocateNew atomically gets the next ID and inserts a placeholder device record.

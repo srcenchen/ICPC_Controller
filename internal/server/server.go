@@ -22,28 +22,32 @@ var webFS embed.FS
 
 // Server is the main HTTP server.
 type Server struct {
-	httpServer *http.Server
-	avahiCmd   *exec.Cmd
-	bindIP     string
+	httpServer  *http.Server
+	avahiCmd    *exec.Cmd
+	bindIP      string
+	enableAvahi bool
 }
 
 // Config holds server configuration.
 type Config struct {
-	Port      string
-	BindIP    string
-	DBPath    string
-	Avahi     bool
-	DeviceH    *service.DeviceHandler
-	CommandH   *service.CommandHandler
-	StatsH     *service.StatsHandler
-	AdminWSH   *service.AdminWSHandler
-	TerminalWSH *service.TerminalWSHandler
-	SettingsH   *service.SettingsHandler
-	NetworkH    *service.NetworkHandler
-	CheckinH    *service.CheckinHandler
-	BroadcastH  *service.BroadcastHandler
-	AuthH       *service.AuthHandler
+	Port          string
+	BindIP        string
+	DBPath        string
+	Avahi         bool
+	DeviceH       *service.DeviceHandler
+	CommandH      *service.CommandHandler
+	StatsH        *service.StatsHandler
+	AdminWSH      *service.AdminWSHandler
+	TerminalWSH   *service.TerminalWSHandler
+	SettingsH     *service.SettingsHandler
+	NetworkH      *service.NetworkHandler
+	CheckinH      *service.CheckinHandler
+	BroadcastH    *service.BroadcastHandler
+	AuthH         *service.AuthHandler
 	DistributionH *service.DistributionHandler
+	ScreenProxyH  *service.ScreenProxyHandler
+	PowerH        *service.PowerHandler
+	InstallH      *service.InstallHandler
 }
 
 // New creates a new Server.
@@ -60,6 +64,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("GET /api/devices", cfg.DeviceH.List)
 	mux.HandleFunc("GET /api/devices/export", cfg.DeviceH.ExportXLSX)
 	mux.HandleFunc("GET /api/devices/{id}", cfg.DeviceH.Get)
+	mux.HandleFunc("GET /api/devices/{id}/events", cfg.DeviceH.Events)
 	mux.HandleFunc("DELETE /api/devices/{id}", cfg.DeviceH.Delete)
 	mux.HandleFunc("POST /api/devices/reset", cfg.DeviceH.Reset)
 	mux.HandleFunc("POST /api/commands", cfg.CommandH.Execute)
@@ -127,6 +132,23 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("POST /api/distribution/reset", cfg.DistributionH.ResetTask)
 	}
 
+	if cfg.ScreenProxyH != nil {
+		mux.HandleFunc("GET /api/devices/{id}/screen", cfg.ScreenProxyH.Proxy)
+	}
+
+	if cfg.PowerH != nil {
+		mux.HandleFunc("POST /api/power/wol", cfg.PowerH.Wake)
+		mux.HandleFunc("GET /api/power/schedules", cfg.PowerH.Schedules)
+		mux.HandleFunc("POST /api/power/schedules", cfg.PowerH.Schedules)
+		mux.HandleFunc("DELETE /api/power/schedules/{id}", cfg.PowerH.DeleteSchedule)
+	}
+
+	if cfg.InstallH != nil {
+		mux.HandleFunc("GET /install.sh", cfg.InstallH.InstallScript)
+		mux.HandleFunc("GET /download/client", cfg.InstallH.DownloadClient)
+		mux.HandleFunc("POST /api/client/update", cfg.InstallH.TriggerUpdate)
+	}
+
 	mux.HandleFunc("GET /ws/broadcast", service.BroadcastWS.Serve)
 	mux.HandleFunc("GET /ws/admin", cfg.AdminWSH.Serve)
 	mux.HandleFunc("GET /ws/terminal/{id}", cfg.TerminalWSH.Serve)
@@ -170,16 +192,21 @@ func New(cfg Config) *Server {
 			Addr:         ":" + cfg.Port,
 			Handler:      handler,
 			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
+			WriteTimeout: 0, // allow long-lived WS / screen proxy streams
 			IdleTimeout:  120 * time.Second,
 		},
-		bindIP: cfg.BindIP,
+		bindIP:      cfg.BindIP,
+		enableAvahi: cfg.Avahi,
 	}
 }
 
 // Start begins listening and handles graceful shutdown.
 func (s *Server) Start() error {
-	go s.startAvahi()
+	if s.enableAvahi {
+		go s.startAvahi()
+	} else {
+		log.Println("[avahi] disabled by config")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -228,7 +255,9 @@ func (s *Server) startAvahi() {
 func (s *Server) stopAvahi() {
 	if s.avahiCmd != nil && s.avahiCmd.Process != nil {
 		log.Println("[avahi] stopping avahi-publish")
-		s.avahiCmd.Process.Signal(syscall.SIGTERM)
+		_ = s.avahiCmd.Process.Signal(syscall.SIGTERM)
+		// Avoid zombie avahi-publish
+		go s.avahiCmd.Wait()
 	}
 }
 

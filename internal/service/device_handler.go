@@ -15,13 +15,34 @@ import (
 
 // DeviceHandler handles REST API requests for devices.
 type DeviceHandler struct {
-	repo *data.DeviceRepo
-	hub  *biz.Hub
+	repo      *data.DeviceRepo
+	hub       *biz.Hub
+	eventRepo *data.DeviceEventRepo
 }
 
 // NewDeviceHandler creates a new DeviceHandler.
-func NewDeviceHandler(repo *data.DeviceRepo, hub *biz.Hub) *DeviceHandler {
-	return &DeviceHandler{repo: repo, hub: hub}
+func NewDeviceHandler(repo *data.DeviceRepo, hub *biz.Hub, eventRepo *data.DeviceEventRepo) *DeviceHandler {
+	return &DeviceHandler{repo: repo, hub: hub, eventRepo: eventRepo}
+}
+
+// Events returns the online/offline history for a device (GET /api/devices/{id}/events).
+func (h *DeviceHandler) Events(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+	if h.eventRepo == nil {
+		writeJSON(w, http.StatusOK, []data.DeviceEvent{})
+		return
+	}
+	events, err := h.eventRepo.ListByDevice(id, 100)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
 }
 
 // List returns all devices as JSON (GET /api/devices).
@@ -110,8 +131,8 @@ func (h *DeviceHandler) ExportXLSX(w http.ResponseWriter, r *http.Request) {
 	sheetName := "Sheet1"
 
 	headers := []string{
-		"编号", "主机名", "用户名", "MAC地址", "IP地址", "操作系统", 
-		"CPU型号", "物理核心数", "逻辑核心数", "GPU信息", "内存大小(GB)", 
+		"编号", "主机名", "用户名", "MAC地址", "IP地址", "操作系统",
+		"CPU型号", "物理核心数", "逻辑核心数", "GPU信息", "内存大小(GB)",
 		"在线状态", "上次上线时间", "首次发现时间", "签到状态", "学生姓名", "学号",
 	}
 

@@ -71,13 +71,68 @@ type DistributionManager struct {
 	activeTask     *DistributeTask
 	taskMu         sync.Mutex
 	activePrecheck *PrecheckSession
+	hostnameLookup func(deviceID int) string
+	fileTimeout    time.Duration // per-file wait timeout
+	stallTimeout   time.Duration // no progress => stalled
 }
 
 func NewDistributionManager(hub *biz.Hub, uploadDir string) *DistributionManager {
 	_ = os.MkdirAll(uploadDir, 0755)
+	// Multi-VLAN labs: allow all peers; same-room /24 still preferred by score.
+	// Operators can change via env ICPC_P2P_PEER_MODE=subnet|all
+	if mode := os.Getenv("ICPC_P2P_PEER_MODE"); mode != "" {
+		gosilver.SetPeerSelectMode(mode)
+	} else {
+		gosilver.SetPeerSelectMode("all")
+	}
 	return &DistributionManager{
-		uploadDir: uploadDir,
-		hub:       hub,
+		uploadDir:    uploadDir,
+		hub:          hub,
+		fileTimeout:  30 * time.Minute,
+		stallTimeout: 3 * time.Minute,
+	}
+}
+
+// SetHostnameLookup injects a device hostname resolver for progress display.
+func (mgr *DistributionManager) SetHostnameLookup(fn func(deviceID int) string) {
+	mgr.hostnameLookup = fn
+}
+
+// GetActiveTaskSnapshot returns a copy of active task status for dashboard (may be nil).
+func (mgr *DistributionManager) GetActiveTaskSnapshot() map[string]interface{} {
+	mgr.taskMu.Lock()
+	t := mgr.activeTask
+	mgr.taskMu.Unlock()
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	completed, failed, total := 0, 0, len(t.Progresses)
+	var sumPct float64
+	for _, p := range t.Progresses {
+		sumPct += p.Percentage
+		switch p.Status {
+		case "completed":
+			completed++
+		case "failed", "cancelled", "stalled":
+			failed++
+		}
+	}
+	avg := 0.0
+	if total > 0 {
+		avg = sumPct / float64(total)
+	}
+	return map[string]interface{}{
+		"task_id":     t.TaskID,
+		"status":      t.Status,
+		"active_file": t.ActiveFile,
+		"active_idx":  t.ActiveIdx,
+		"files":       t.Files,
+		"total":       total,
+		"completed":   completed,
+		"failed":      failed,
+		"avg_pct":     avg,
 	}
 }
 
@@ -130,12 +185,6 @@ func (mgr *DistributionManager) ClearAllFiles() error {
 // StartTask creates and runs a sequential P2P file distribution task
 func (mgr *DistributionManager) StartTask(files []string, saveDir string, targetIDs []int, serverIP string, postCmd string) (*DistributeTask, error) {
 	mgr.taskMu.Lock()
-	mgr.taskMu.Unlock() // Wait, let's keep the original lock pattern!
-	// Wait, let's look at lines 116-117 in the original:
-	// mgr.taskMu.Lock()
-	// defer mgr.taskMu.Unlock()
-	// Let's use the precise code:
-	mgr.taskMu.Lock()
 	defer mgr.taskMu.Unlock()
 
 	if mgr.activeTask != nil && mgr.activeTask.Status == "running" {
@@ -146,6 +195,18 @@ func (mgr *DistributionManager) StartTask(files []string, saveDir string, target
 		return nil, fmt.Errorf("no files selected for distribution")
 	}
 
+	// Sanitize file names and verify under uploadDir
+	cleanFiles := make([]string, 0, len(files))
+	for _, f := range files {
+		base := filepath.Base(f)
+		path := filepath.Join(mgr.uploadDir, base)
+		if _, err := os.Stat(path); err != nil {
+			return nil, fmt.Errorf("file not found: %s", base)
+		}
+		cleanFiles = append(cleanFiles, base)
+	}
+	files = cleanFiles
+
 	if saveDir == "" {
 		saveDir = "./downloads"
 	}
@@ -153,15 +214,8 @@ func (mgr *DistributionManager) StartTask(files []string, saveDir string, target
 	// Resolve targets
 	var finalTargets []int
 	if len(targetIDs) == 0 {
-		// All online devices
 		mgr.hub.BroadcastAdminEvent("distribute_log", "未指定目标设备，自动选择所有在线选手机进行分发")
-		// Get all clients from hub
-		// A simple read connection IDs is clean
-		for i := 1; i <= 200; i++ {
-			if mgr.hub.IsOnline(i) {
-				finalTargets = append(finalTargets, i)
-			}
-		}
+		finalTargets = mgr.hub.OnlineIDs()
 	} else {
 		finalTargets = targetIDs
 	}
@@ -174,8 +228,10 @@ func (mgr *DistributionManager) StartTask(files []string, saveDir string, target
 	progresses := make(map[int]*ClientProgress)
 	for _, deviceID := range finalTargets {
 		hostname := fmt.Sprintf("#%d", deviceID)
-		if client := mgr.hub.GetClient(deviceID); client != nil {
-			// We don't have hostname in client connection directly, but we can query or let it resolve in UI
+		if mgr.hostnameLookup != nil {
+			if h := mgr.hostnameLookup(deviceID); h != "" {
+				hostname = h
+			}
 		}
 		progresses[deviceID] = &ClientProgress{
 			DeviceID:  deviceID,
@@ -282,7 +338,7 @@ func (mgr *DistributionManager) RetryDevice(deviceID int) error {
 		return fmt.Errorf("device not part of the active task")
 	}
 
-	if p.Status != "failed" {
+	if p.Status != "failed" && p.Status != "stalled" && p.Status != "cancelled" {
 		t.mu.Unlock()
 		return fmt.Errorf("device is not in failed state (current status: %s)", p.Status)
 	}
@@ -298,7 +354,7 @@ func (mgr *DistributionManager) RetryDevice(deviceID int) error {
 	if lanIP == "" {
 		lanIP = getOutboundIP()
 	}
-	senderAddr := fmt.Sprintf("%s:48080", lanIP)
+	senderAddr := net.JoinHostPort(lanIP, "48080")
 
 	startMsg := model.DistributeStartMessage{
 		Type:       "distribute_start",
@@ -313,16 +369,15 @@ func (mgr *DistributionManager) RetryDevice(deviceID int) error {
 	msgBytes, _ := json.Marshal(startMsg)
 	msgBytes = append(msgBytes, '\n')
 
-	clientConn := mgr.hub.GetClient(deviceID)
-	if clientConn == nil {
+	if !mgr.hub.TrySend(deviceID, msgBytes) {
 		t.mu.Lock()
-		p.Status = "failed"
-		p.Error = "client offline"
+		if pp, ok := t.Progresses[deviceID]; ok {
+			pp.Status = "failed"
+			pp.Error = "client offline or send buffer full"
+		}
 		t.mu.Unlock()
-		return fmt.Errorf("device is offline")
+		return fmt.Errorf("device is offline or busy")
 	}
-
-	clientConn.Send <- msgBytes
 	mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
 	return nil
 }
@@ -377,9 +432,10 @@ func (t *DistributeTask) run(mgr *DistributionManager) {
 		if lanIP == "" {
 			lanIP = getOutboundIP()
 		}
-		senderAddr := fmt.Sprintf("%s:48080", lanIP)
+		senderAddr := net.JoinHostPort(lanIP, "48080")
 
 		// Reset progresses of active target devices for the current file
+		nowStr := time.Now().Format("2006-01-02 15:04:05")
 		for _, p := range t.Progresses {
 			p.Downloaded = 0
 			p.TotalChunks = 0
@@ -387,7 +443,7 @@ func (t *DistributeTask) run(mgr *DistributionManager) {
 			p.SpeedMbps = 0
 			p.Status = "downloading"
 			p.Error = ""
-			p.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
+			p.UpdatedAt = nowStr
 		}
 		t.mu.Unlock()
 		mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
@@ -404,34 +460,42 @@ func (t *DistributeTask) run(mgr *DistributionManager) {
 		msgBytes, _ := json.Marshal(startMsg)
 		msgBytes = append(msgBytes, '\n')
 
-		t.mu.RLock()
-		for id := range t.Progresses {
-			clientConn := mgr.hub.GetClient(id)
-			if clientConn != nil {
-				clientConn.Send <- msgBytes
-			} else {
-				p := t.Progresses[id]
+		t.mu.Lock()
+		for id, p := range t.Progresses {
+			if !mgr.hub.TrySend(id, msgBytes) {
 				p.Status = "failed"
-				p.Error = "client offline"
+				p.Error = "client offline or send buffer full"
+				p.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
 			}
 		}
-		t.mu.RUnlock()
+		t.mu.Unlock()
 		mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
 
-		// Wait loop
+		// Wait loop with per-file timeout and stall detection
+		fileDeadline := time.Now().Add(mgr.fileTimeout)
 		for {
 			time.Sleep(1 * time.Second)
 
-			t.mu.RLock()
+			t.mu.Lock()
 			isStopped := t.Status == "stopped"
-			t.mu.RUnlock()
-
 			if isStopped {
+				t.mu.Unlock()
 				return
 			}
 
-			// Check if all active clients finished (status != downloading)
-			t.mu.RLock()
+			// Mark stalled clients with no progress update
+			now := time.Now()
+			for _, p := range t.Progresses {
+				if p.Status != "downloading" && p.Status != "idle" {
+					continue
+				}
+				updated, err := time.ParseInLocation("2006-01-02 15:04:05", p.UpdatedAt, time.Local)
+				if err == nil && now.Sub(updated) > mgr.stallTimeout {
+					p.Status = "stalled"
+					p.Error = fmt.Sprintf("无进度超过 %v", mgr.stallTimeout)
+				}
+			}
+
 			allFinished := true
 			for _, p := range t.Progresses {
 				if p.Status == "downloading" || p.Status == "idle" {
@@ -439,7 +503,18 @@ func (t *DistributeTask) run(mgr *DistributionManager) {
 					break
 				}
 			}
-			t.mu.RUnlock()
+			timedOut := now.After(fileDeadline)
+			if timedOut && !allFinished {
+				for _, p := range t.Progresses {
+					if p.Status == "downloading" || p.Status == "idle" {
+						p.Status = "failed"
+						p.Error = "file distribution timeout"
+					}
+				}
+				allFinished = true
+				log.Printf("[dist] file %s timed out after %v", file, mgr.fileTimeout)
+			}
+			t.mu.Unlock()
 
 			if allFinished {
 				log.Printf("[dist] file %s distribution finished", file)
@@ -527,11 +602,7 @@ func (mgr *DistributionManager) RunPrecheck(serverIP string, targetIDs []int) ([
 	// Resolve targets
 	var finalTargets []int
 	if len(targetIDs) == 0 {
-		for i := 1; i <= 200; i++ {
-			if mgr.hub.IsOnline(i) {
-				finalTargets = append(finalTargets, i)
-			}
-		}
+		finalTargets = mgr.hub.OnlineIDs()
 	} else {
 		finalTargets = targetIDs
 	}
@@ -560,12 +631,15 @@ func (mgr *DistributionManager) RunPrecheck(serverIP string, targetIDs []int) ([
 		mgr.taskMu.Unlock()
 	}()
 
-	// Start temporary TCP listener on 48080
-	ln, err := net.Listen("tcp", ":48080")
+	// Probe listener on an ephemeral port. Binding 48080 (the GoSilver transfer
+	// port) would collide with an in-flight distribution, so the port is chosen
+	// by the OS and sent to the clients.
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
-		return nil, fmt.Errorf("failed to bind port 48080 on server: %w", err)
+		return nil, fmt.Errorf("failed to open connectivity probe port on server: %w", err)
 	}
 	defer ln.Close()
+	probePort := ln.Addr().(*net.TCPAddr).Port
 
 	go func() {
 		for {
@@ -581,6 +655,7 @@ func (mgr *DistributionManager) RunPrecheck(serverIP string, targetIDs []int) ([
 	precheckMsg := map[string]interface{}{
 		"type":      "distribute_precheck",
 		"server_ip": serverIP,
+		"port":      probePort,
 	}
 	msgBytes, _ := json.Marshal(precheckMsg)
 	msgBytes = append(msgBytes, '\n')

@@ -24,8 +24,16 @@ var BroadcastDisplay = (function() {
   }
 
   var wsReconnect = false;
+  var pingTimer = null;
   function connectWS() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
+    if (pingTimer) {
+      clearInterval(pingTimer);
+      pingTimer = null;
+    }
     ws = new WebSocket(proto + "//" + location.host + "/ws/broadcast?mode=" + mode);
     ws.onopen = function() {
       // Only do full HTTP refresh on first connect. Reconnects just resume.
@@ -35,12 +43,16 @@ var BroadcastDisplay = (function() {
       }
       // Stop local fallback timer.
       clearTimeout(pageTimer);
-      setInterval(function(){ if(ws&&ws.readyState===WebSocket.OPEN) ws.send('ping'); }, 30000);
+      pingTimer = setInterval(function(){ if(ws&&ws.readyState===WebSocket.OPEN) ws.send('ping'); }, 30000);
     };
     ws.onmessage = function(e) {
       try { var msg = JSON.parse(e.data); handleWSMessage(msg); } catch(err) {}
     };
     ws.onclose = function() {
+      if (pingTimer) {
+        clearInterval(pingTimer);
+        pingTimer = null;
+      }
       // Start local carousel as fallback.
       if (pages.length > 1) {
         scheduleNext(pages[currentIdx] || pages[0]);
@@ -366,7 +378,7 @@ var BroadcastDisplay = (function() {
     var span = document.createElement("span");
     span.className = "scroll-text";
     span.textContent = it.content;
-    span.style.fontSize = it.font_size;
+    span.style.fontSize = scaleFont(it.font_size);
     span.style.color = it.font_color;
     span.style.fontWeight = it.font_weight;
     el.style.display = "flex";

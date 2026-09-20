@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"ICPCRemoteControl/internal/data"
 	"ICPCRemoteControl/internal/model"
@@ -18,6 +19,21 @@ type CommandDispatcher struct {
 // NewCommandDispatcher creates a new CommandDispatcher.
 func NewCommandDispatcher(hub *Hub, commandRepo *data.CommandRepo) *CommandDispatcher {
 	return &CommandDispatcher{hub: hub, commandRepo: commandRepo}
+}
+
+// CreateAndDispatch persists a command then dispatches it (single or broadcast).
+// Used by non-HTTP callers such as the scheduled power actions.
+func (d *CommandDispatcher) CreateAndDispatch(cmd *model.CommandLog) error {
+	if err := d.commandRepo.Create(cmd); err != nil {
+		return fmt.Errorf("create command: %w", err)
+	}
+	if cmd.TargetType == "broadcast" {
+		return d.DispatchBroadcast(cmd)
+	}
+	if cmd.TargetID == nil {
+		return fmt.Errorf("single command requires a target device")
+	}
+	return d.DispatchSingle(cmd)
 }
 
 // DispatchSingle sends a command to a specific device.
@@ -52,6 +68,7 @@ func (d *CommandDispatcher) DispatchBroadcast(parentCmd *model.CommandLog) error
 	parentCmd.Status = model.CommandStatusDispatched
 	d.commandRepo.UpdateStatus(parentCmd)
 
+	failures := 0
 	var lastErr error
 	for _, client := range clients {
 		targetID := client.AssignedID
@@ -61,18 +78,27 @@ func (d *CommandDispatcher) DispatchBroadcast(parentCmd *model.CommandLog) error
 			TargetID:   &targetID,
 			Command:    parentCmd.Command,
 			Status:     model.CommandStatusPending,
+			ExecutedBy: parentCmd.ExecutedBy,
 		}
 		if err := d.commandRepo.Create(childCmd); err != nil {
 			log.Printf("[dispatcher] failed to create child command for device %d: %v", client.AssignedID, err)
+			failures++
 			lastErr = err
 			continue
 		}
 
+		// dispatchToClient records per-device failures on the child row, so a
+		// partial broadcast stays diagnosable per machine.
 		if err := d.dispatchToClient(client, childCmd); err != nil {
+			failures++
 			lastErr = err
 		}
 	}
-	return lastErr
+	if failures > 0 {
+		return fmt.Errorf("%d of %d devices failed to receive the command (last: %v)",
+			failures, len(clients), lastErr)
+	}
+	return nil
 }
 
 // UpdateBroadcastParentStatus checks if all children of a broadcast are done and updates the parent.
@@ -87,7 +113,7 @@ func (d *CommandDispatcher) UpdateBroadcastParentStatus(parentID int64) {
 	failed := 0
 	timedOut := 0
 	var totalDuration int64
-	var outputs string
+	var failedDevices []string
 
 	for _, child := range children {
 		switch child.Status {
@@ -101,15 +127,9 @@ func (d *CommandDispatcher) UpdateBroadcastParentStatus(parentID int64) {
 			return
 		}
 		totalDuration += child.DurationMS
-		targetID := 0
-		if child.TargetID != nil {
-			targetID = *child.TargetID
+		if child.Status != model.CommandStatusCompleted && child.TargetID != nil {
+			failedDevices = append(failedDevices, fmt.Sprintf("#%d", *child.TargetID))
 		}
-		outputs += fmt.Sprintf("--- Device #%d ---\n%s", targetID, child.Output)
-		if child.ErrorOutput != "" {
-			outputs += fmt.Sprintf("\n[stderr] %s", child.ErrorOutput)
-		}
-		outputs += "\n"
 	}
 
 	parent, err := d.commandRepo.GetByID(parentID)
@@ -118,8 +138,23 @@ func (d *CommandDispatcher) UpdateBroadcastParentStatus(parentID int64) {
 		return
 	}
 
+	// Summary only: concatenating every child's stdout duplicated the whole
+	// fleet's output into one row. The UI expands children on demand.
+	summary := fmt.Sprintf("共 %d 台：成功 %d，失败 %d，超时 %d", len(children), completed, failed, timedOut)
+	if len(failedDevices) > 0 {
+		shown := failedDevices
+		if len(shown) > 40 {
+			shown = shown[:40]
+		}
+		summary += "\n未成功设备：" + strings.Join(shown, " ")
+		if len(failedDevices) > len(shown) {
+			summary += fmt.Sprintf(" …（另 %d 台）", len(failedDevices)-len(shown))
+		}
+	}
+	summary += "\n（展开查看每台设备的详细输出）"
+
 	parent.Status = model.CommandStatusCompleted
-	parent.Output = outputs
+	parent.Output = summary
 	parent.DurationMS = totalDuration
 	if err := d.commandRepo.UpdateStatus(parent); err != nil {
 		log.Printf("[dispatcher] update parent %d: %v", parentID, err)

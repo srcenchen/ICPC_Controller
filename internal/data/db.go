@@ -3,7 +3,6 @@ package data
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -72,8 +71,6 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_devices_assigned_id ON devices(assigned_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac_address)`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_connected ON devices(connected)`,
-		// Migration for existing DBs.
-		`ALTER TABLE devices ADD COLUMN mac_address TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS command_log (
 			id              INTEGER PRIMARY KEY AUTOINCREMENT,
 			parent_id       INTEGER,
@@ -92,15 +89,6 @@ func migrate(db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_command_log_target ON command_log(target_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_command_log_status ON command_log(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_command_log_created ON command_log(created_at)`,
-		// Migration for existing DBs: add parent_id if missing (ignore error if exists).
-		`ALTER TABLE command_log ADD COLUMN parent_id INTEGER`,
-		// Migration: check-in management fields.
-		`ALTER TABLE devices ADD COLUMN checkin_status INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE devices ADD COLUMN student_name TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE devices ADD COLUMN student_num TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE devices ADD COLUMN checkin_time TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE devices ADD COLUMN checkout_time TEXT NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_devices_checkin_status ON devices(checkin_status)`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key   TEXT PRIMARY KEY,
 			value TEXT NOT NULL DEFAULT ''
@@ -148,16 +136,103 @@ func migrate(db *sql.DB) error {
 			extra_json    TEXT NOT NULL DEFAULT '{}'
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_broadcast_items_page ON broadcast_items(page_id)`,
+		`CREATE TABLE IF NOT EXISTS device_events (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			assigned_id INTEGER NOT NULL,
+			event       TEXT    NOT NULL,
+			detail      TEXT    NOT NULL DEFAULT '',
+			at          TEXT    NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_device_events_device ON device_events(assigned_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_device_events_at ON device_events(at)`,
+		`CREATE TABLE IF NOT EXISTS power_schedules (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			action      TEXT    NOT NULL,
+			run_at      TEXT    NOT NULL,
+			target_type TEXT    NOT NULL DEFAULT 'all',
+			target_ids  TEXT    NOT NULL DEFAULT '[]',
+			status      TEXT    NOT NULL DEFAULT 'pending',
+			note        TEXT    NOT NULL DEFAULT '',
+			created_by  TEXT    NOT NULL DEFAULT '',
+			created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+			fired_at    TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_power_schedules_status ON power_schedules(status, run_at)`,
 	}
 
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
-			// Ignore "duplicate column" errors from ALTER TABLE on new databases.
-			if strings.Contains(err.Error(), "duplicate column name") {
-				continue
-			}
 			return fmt.Errorf("exec migration: %w\n%s", err, stmt)
 		}
+	}
+
+	// Column additions for databases created by older versions. Checked against
+	// the live schema rather than relying on ALTER TABLE error strings.
+	addColumns := []struct{ table, column, def string }{
+		{"devices", "mac_address", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "checkin_status", "INTEGER NOT NULL DEFAULT 0"},
+		{"devices", "student_name", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "student_num", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "checkin_time", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "checkout_time", "TEXT NOT NULL DEFAULT ''"},
+		// Health metrics reported by the client heartbeat.
+		{"devices", "cpu_pct", "REAL NOT NULL DEFAULT -1"},
+		{"devices", "mem_pct", "REAL NOT NULL DEFAULT -1"},
+		{"devices", "disk_pct", "REAL NOT NULL DEFAULT -1"},
+		{"devices", "temp_c", "REAL NOT NULL DEFAULT -1"},
+		{"devices", "load1", "REAL NOT NULL DEFAULT -1"},
+		{"devices", "health_at", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "client_version", "TEXT NOT NULL DEFAULT ''"},
+		{"command_log", "parent_id", "INTEGER"},
+	}
+	for _, ac := range addColumns {
+		if err := addColumnIfMissing(db, ac.table, ac.column, ac.def); err != nil {
+			return err
+		}
+	}
+
+	// Indexes that depend on migrated columns.
+	postIndexes := []string{
+		`CREATE INDEX IF NOT EXISTS idx_devices_checkin_status ON devices(checkin_status)`,
+	}
+	for _, stmt := range postIndexes {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("exec migration: %w\n%s", err, stmt)
+		}
+	}
+	return nil
+}
+
+// addColumnIfMissing adds a column only when the table lacks it, using
+// PRAGMA table_info instead of matching driver error strings.
+func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("table_info %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			return fmt.Errorf("scan table_info %s: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table_info %s: %w", table, err)
+	}
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
 	}
 	return nil
 }

@@ -28,8 +28,9 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Update accepts partial settings updates (POST /api/settings).
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		HostnamePrefix       *string `json:"hostname_prefix,omitempty"`
-		ScreenMonitorEnabled *bool   `json:"screen_monitor_enabled,omitempty"`
+		HostnamePrefix       *string         `json:"hostname_prefix,omitempty"`
+		ScreenMonitorEnabled *bool           `json:"screen_monitor_enabled,omitempty"`
+		Maintenance          *MaintenanceCfg `json:"maintenance,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -62,6 +63,10 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 		})
 		cfgData = append(cfgData, '\n')
 		h.hub.BroadcastToClients(cfgData)
+	}
+
+	if req.Maintenance != nil {
+		h.settings.SetMaintenance(*req.Maintenance)
 	}
 
 	writeJSON(w, http.StatusOK, h.settings.Snapshot())

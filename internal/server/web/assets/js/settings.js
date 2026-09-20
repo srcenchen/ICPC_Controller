@@ -95,6 +95,32 @@ function renderPage(settings) {
             '<div id="presets-result" class="settings-result"></div>' +
         '</div>' +
 
+        // Maintenance / retention section
+        '<div class="settings-card">' +
+            '<h3>运维与保留策略</h3>' +
+            '<p class="settings-desc">命令日志与设备事件的自动清理，以及健康告警阈值。</p>' +
+            '<div class="power-form" style="margin-bottom:8px">' +
+                '<label>命令日志保留(天)<input type="number" id="mt-cmd-days" min="0" style="width:90px"></label>' +
+                '<label>命令日志上限(条)<input type="number" id="mt-cmd-max" min="0" style="width:110px"></label>' +
+                '<label>事件保留(天)<input type="number" id="mt-event-days" min="0" style="width:90px"></label>' +
+            '</div>' +
+            '<div class="power-form" style="margin-bottom:12px">' +
+                '<label>磁盘告警(%)<input type="number" id="mt-disk" min="0" max="100" style="width:80px"></label>' +
+                '<label>温度告警(°C)<input type="number" id="mt-temp" min="0" style="width:80px"></label>' +
+                '<label>内存告警(%)<input type="number" id="mt-mem" min="0" max="100" style="width:80px"></label>' +
+                '<button id="btn-save-maint" class="btn btn-primary">保存</button>' +
+            '</div>' +
+            '<div id="maint-result" class="settings-result"></div>' +
+        '</div>' +
+
+        // Client update section
+        '<div class="settings-card">' +
+            '<h3>客户端更新</h3>' +
+            '<p class="settings-desc">在“分发”页上传新客户端二进制（文件名 icpc-client）后，推送在线选手机自更新。</p>' +
+            '<button id="btn-update-clients" class="btn btn-warning">推送客户端更新</button>' +
+            '<div id="update-result" class="settings-result"></div>' +
+        '</div>' +
+
         // Change password section
         '<div class="settings-card">' +
             '<h3>修改管理员密码</h3>' +
@@ -209,6 +235,41 @@ function renderPage(settings) {
                 showResult("presets-result", "预设已保存", "success");
             },
             error: function(xhr) { showResult("presets-result", parseError(xhr), "error"); }
+        });
+    });
+
+    // Maintenance / retention.
+    var mt = settings.maintenance || {};
+    $("#mt-cmd-days").val(mt.cmd_retention_days != null ? mt.cmd_retention_days : 14);
+    $("#mt-cmd-max").val(mt.cmd_retention_max != null ? mt.cmd_retention_max : 5000);
+    $("#mt-event-days").val(mt.event_retention_day != null ? mt.event_retention_day : 30);
+    $("#mt-disk").val(mt.disk_alert_pct != null ? mt.disk_alert_pct : 90);
+    $("#mt-temp").val(mt.temp_alert_c != null ? mt.temp_alert_c : 85);
+    $("#mt-mem").val(mt.mem_alert_pct != null ? mt.mem_alert_pct : 92);
+    $("#btn-save-maint").on("click", function() {
+        var data = { maintenance: {
+            cmd_retention_days:  parseInt($("#mt-cmd-days").val(), 10) || 0,
+            cmd_retention_max:   parseInt($("#mt-cmd-max").val(), 10) || 0,
+            event_retention_day: parseInt($("#mt-event-days").val(), 10) || 0,
+            disk_alert_pct:      parseFloat($("#mt-disk").val()) || 0,
+            temp_alert_c:        parseFloat($("#mt-temp").val()) || 0,
+            mem_alert_pct:       parseFloat($("#mt-mem").val()) || 0
+        }};
+        $.ajax({
+            url: "/api/settings", method: "POST", contentType: "application/json",
+            data: JSON.stringify(data),
+            success: function() { showResult("maint-result", "已保存", "success"); },
+            error: function(xhr) { showResult("maint-result", parseError(xhr), "error"); }
+        });
+    });
+
+    // Client update push.
+    $("#btn-update-clients").on("click", function() {
+        if (!confirm("将向所有在线选手机推送客户端自更新，确定继续？")) return;
+        $.ajax({
+            url: "/api/client/update", method: "POST",
+            success: function(res) { showResult("update-result", "已推送到 " + res.sent + " 台在线设备", "success"); },
+            error: function(xhr) { showResult("update-result", parseError(xhr), "error"); }
         });
     });
 

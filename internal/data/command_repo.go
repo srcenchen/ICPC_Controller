@@ -59,6 +59,44 @@ func (r *CommandRepo) UpdateStatus(cmd *model.CommandLog) error {
 	return err
 }
 
+// UpdateOutput writes only the output column. Used by the throttled streaming
+// path so a running command doesn't rewrite status/timestamps on every flush.
+func (r *CommandRepo) UpdateOutput(id int64, output string) error {
+	_, err := r.db.Exec(`UPDATE command_log SET output=? WHERE id=?`, output, id)
+	return err
+}
+
+// DeleteOlderThan removes command logs (and their children) created before cutoff.
+func (r *CommandRepo) DeleteOlderThan(cutoff time.Time) (int64, error) {
+	res, err := r.db.Exec(`DELETE FROM command_log WHERE created_at < ?`, cutoff.Format(time.RFC3339))
+	if err != nil {
+		return 0, fmt.Errorf("delete old commands: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteBeyondCount keeps the newest keep top-level commands (with their
+// children) and deletes the rest.
+func (r *CommandRepo) DeleteBeyondCount(keep int) (int64, error) {
+	if keep <= 0 {
+		return 0, nil
+	}
+	res, err := r.db.Exec(`
+		DELETE FROM command_log
+		WHERE id NOT IN (
+			SELECT id FROM command_log WHERE parent_id IS NULL ORDER BY id DESC LIMIT ?
+		)
+		AND COALESCE(parent_id, -1) NOT IN (
+			SELECT id FROM command_log WHERE parent_id IS NULL ORDER BY id DESC LIMIT ?
+		)`, keep, keep)
+	if err != nil {
+		return 0, fmt.Errorf("trim commands: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // GetByID retrieves a command log by its ID.
 func (r *CommandRepo) GetByID(id int64) (*model.CommandLog, error) {
 	query := `SELECT id, parent_id, target_type, target_id, command, status, output, error_output,

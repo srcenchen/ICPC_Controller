@@ -44,12 +44,12 @@ func (h *StatsHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := map[string]interface{}{
-		"total_devices":    total,
-		"online_devices":   online,
-		"offline_devices":  total - online,
-		"checked_in":       checkedIn,
-		"total_commands":   totalCommands,
-		"recent_commands":  recentCommands,
+		"total_devices":   total,
+		"online_devices":  online,
+		"offline_devices": total - online,
+		"checked_in":      checkedIn,
+		"total_commands":  totalCommands,
+		"recent_commands": recentCommands,
 	}
 	writeJSON(w, http.StatusOK, stats)
 }

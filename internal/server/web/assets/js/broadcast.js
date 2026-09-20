@@ -100,7 +100,7 @@ function renderHeaderHtml() {
       '<button class="btn btn-sm btn-primary" onclick="pushToDevices()">推送</button>' +
       '<button class="btn btn-sm btn-danger" onclick="pushKillBroadcast()">关闭广播</button>' +
       '</div></div>';
-  h += '<div style="display:flex;gap:6px;margin-bottom:10px;">' + mt("before","赛前") + mt("contesting","赛中") + mt("after","赛后") + '</div>';
+  h += '<div class="tabs" style="margin-bottom:12px;">' + mt("before","赛前") + mt("contesting","赛中") + mt("after","赛后") + '</div>';
   return h;
 }
 
@@ -116,7 +116,7 @@ function renderConfigHtml() {
   '<div class="settings-card" style="padding:10px;"><h4 style="font-size:13px;margin-bottom:6px;">推送地址</h4><div style="display:flex;gap:6px;"><input id="broadcast-base-url" placeholder="http://icpc-server.local:8082" value="'+esc(bcConfig.base_url||'')+'" style="flex:1;font-size:12px;"><button class="btn btn-sm btn-primary" onclick="saveCfg(\'base_url\',$(\'#broadcast-base-url\').val().trim())">保存</button></div></div>';
 }
 
-function mt(m,label){ return `<button style="${m===bcMode?'background:var(--accent);color:#fff;':''}" class="btn btn-sm btn-outline" onclick="switchMode('${m}')">${label}</button>`; }
+function mt(m,label){ return `<button class="tab${m===bcMode?' active':''}" onclick="switchMode('${m}')">${label}</button>`; }
 function switchMode(m){ bcMode=m; bcSelPage=null; bcSelItem=null; loadPages(); }
 
 // ==================== SIDEBAR ====================

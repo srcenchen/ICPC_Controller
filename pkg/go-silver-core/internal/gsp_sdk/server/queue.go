@@ -13,7 +13,24 @@ type queue2 struct {
 	s *Session
 }
 
+// PeerSelectMode controls P2P peer filtering for multi-lab sites.
+// "subnet" (default): only peers in same /24 (IPv4) or /48 (IPv6)
+// "all": allow any peer (useful when rooms span VLANs but L3 is open)
+var PeerSelectMode = "subnet"
+
+// SetPeerSelectMode sets peer selection mode ("subnet" or "all").
+func SetPeerSelectMode(mode string) {
+	if mode == "all" {
+		PeerSelectMode = "all"
+	} else {
+		PeerSelectMode = "subnet"
+	}
+}
+
 func isReachableSubnet(reqIP, peerIP string) bool {
+	if PeerSelectMode == "all" {
+		return true
+	}
 	netIP1 := net.ParseIP(reqIP)
 	netIP2 := net.ParseIP(peerIP)
 	if netIP1 == nil || netIP2 == nil {

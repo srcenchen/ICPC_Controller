@@ -14,12 +14,12 @@ function stopAllIOSLoops() {
     activeIOSLoops = [];
 }
 
-function startImageLoop(imgElement, ip, hd) {
+function startImageLoop(imgElement, deviceId, hd) {
     var active = true;
     
     function loadNext() {
         if (!active) return;
-        var url = 'http://' + ip + ':8090/screen?hd=' + (hd ? '1' : '0') + '&single=1&_t=' + Date.now();
+        var url = '/api/devices/' + deviceId + '/screen?hd=' + (hd ? '1' : '0') + '&single=1&_t=' + Date.now();
         
         var tempImg = new Image();
         tempImg.onload = function() {
@@ -154,12 +154,12 @@ function renderScreenDevices(devices) {
         } else if (!ip) {
             bodyHtml = '<div class="screen-placeholder">未知IP</div>';
         } else {
+            var proxyUrl = '/api/devices/' + d.assigned_id + '/screen';
             if (isIOS()) {
-                bodyHtml = '<img class="ios-screen-img" data-ip="' + ip + '" data-hd="0" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
+                bodyHtml = '<img class="ios-screen-img" data-id="' + d.assigned_id + '" data-hd="0" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
                            '<div class="screen-placeholder screen-err" style="display:none;">无法连接屏幕流</div>';
             } else {
-                var streamUrl = 'http://' + ip + ':8090/screen';
-                bodyHtml = '<img src="' + streamUrl + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
+                bodyHtml = '<img src="' + proxyUrl + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
                            '<div class="screen-placeholder screen-err" style="display:none;">无法连接屏幕流</div>';
             }
         }
@@ -202,9 +202,9 @@ function renderScreenDevices(devices) {
         stopAllIOSLoops();
         $(".ios-screen-img").each(function() {
             var img = this;
-            var ip = $(img).data("ip");
+            var deviceId = $(img).data("id");
             var hd = $(img).data("hd") === 1;
-            var loop = startImageLoop(img, ip, hd);
+            var loop = startImageLoop(img, deviceId, hd);
             activeIOSLoops.push(loop);
         });
     }
@@ -234,8 +234,6 @@ function getDeviceIP(localIpJson) {
 }
 
 function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
-    if (!ip) return;
-    
     var html = 
         '<div class="modal-overlay" id="screen-modal-overlay" onclick="closeLargeScreen(event)">' +
             '<div class="modal modal-large" onclick="event.stopPropagation()">' +
@@ -244,9 +242,9 @@ function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
                 '<div class="modal-large-body">';
                 
     if (isIOS()) {
-        html += '<img id="ios-large-img" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
+        html += '<img id="ios-large-img" data-id="' + assignedId + '" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
     } else {
-        var streamUrl = 'http://' + ip + ':8090/screen?hd=1';
+        var streamUrl = '/api/devices/' + assignedId + '/screen?hd=1';
         html += '<img src="' + streamUrl + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
     }
     
@@ -259,7 +257,7 @@ function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
     
     if (isIOS()) {
         var imgEl = document.getElementById("ios-large-img");
-        largeIOSLoop = startImageLoop(imgEl, ip, true);
+        largeIOSLoop = startImageLoop(imgEl, assignedId, true);
     }
 }
 

@@ -61,6 +61,9 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		TargetID:   req.TargetID,
 		Command:    req.Command,
 		Status:     model.CommandStatusDispatched,
+		// Audit trail: there is a single admin identity, so record where the
+		// request came from. Useful when reconstructing a contest incident.
+		ExecutedBy: "admin@" + getClientIP(r),
 	}
 
 	if err := h.repo.Create(cmd); err != nil {

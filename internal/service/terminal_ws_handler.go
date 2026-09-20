@@ -80,7 +80,10 @@ func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	}
 	data, _ := json.Marshal(openMsg)
 	data = append(data, '\n')
-	select { case client.Send <- data: default: }
+	select {
+	case client.Send <- data:
+	default:
+	}
 
 	// Read from browser and forward to client as terminal_input / terminal_resize.
 	readErr := make(chan error, 1)
@@ -100,8 +103,12 @@ func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 					Rows int    `json:"rows"`
 				}
 				if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" {
-					if ctrl.Cols > maxCols { ctrl.Cols = maxCols }
-					if ctrl.Rows > maxRows { ctrl.Rows = maxRows }
+					if ctrl.Cols > maxCols {
+						ctrl.Cols = maxCols
+					}
+					if ctrl.Rows > maxRows {
+						ctrl.Rows = maxRows
+					}
 					resizeMsg := model.TerminalResizeMessage{
 						Type:      "terminal_resize",
 						SessionID: sessionID,
@@ -110,7 +117,10 @@ func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 					}
 					data, _ := json.Marshal(resizeMsg)
 					data = append(data, '\n')
-					select { case client.Send <- data: default: }
+					select {
+					case client.Send <- data:
+					default:
+					}
 					continue
 				}
 			}
@@ -123,7 +133,10 @@ func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 			}
 			data, _ := json.Marshal(inputMsg)
 			data = append(data, '\n')
-			select { case client.Send <- data: default: }
+			select {
+			case client.Send <- data:
+			default:
+			}
 		}
 	}()
 
@@ -148,5 +161,8 @@ cleanup:
 	}
 	data, _ = json.Marshal(closeMsg)
 	data = append(data, '\n')
-	select { case client.Send <- data: default: }
+	select {
+	case client.Send <- data:
+	default:
+	}
 }

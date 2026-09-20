@@ -7,10 +7,7 @@ import (
 	"image/jpeg"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,70 +34,66 @@ func isScreenCaptureEnabled() bool {
 	return screenCaptureEnabled
 }
 
-// prepareX11Env detects DISPLAY and XAUTHORITY from active sessions when they are not set.
-func prepareX11Env() {
-	if os.Getenv("DISPLAY") == "" {
-		// Look in /tmp/.X11-unix/ for display sockets
-		files, _ := filepath.Glob("/tmp/.X11-unix/X*")
-		if len(files) > 0 {
-			base := filepath.Base(files[0])
-			displayNum := strings.TrimPrefix(base, "X")
-			os.Setenv("DISPLAY", ":"+displayNum)
-			log.Printf("[screen-monitor] auto-detected DISPLAY=%s from /tmp/.X11-unix/", ":"+displayNum)
-		} else {
-			os.Setenv("DISPLAY", ":0")
-			log.Println("[screen-monitor] default DISPLAY to :0")
-		}
+// prepareX11Env lives in x11env.go (shared with the watermark path).
+
+// captureScreen captures the active display screen.
+// A single X11 connection is shared across all frames and viewers. Opening a
+// new xgb connection per frame (the previous behaviour) was needless overhead
+// at 4 FPS; the connection is reopened lazily if it drops.
+var (
+	captureMu   sync.Mutex
+	captureConn *xgb.Conn
+	captureRoot xproto.Window
+	captureW    uint16
+	captureH    uint16
+	captureRGBA *image.RGBA // reused backing buffer
+)
+
+func ensureCaptureConn() error {
+	if captureConn != nil {
+		return nil
 	}
+	prepareX11Env()
+	c, err := xgb.NewConn()
+	if err != nil {
+		return fmt.Errorf("xgb conn: %w", err)
+	}
+	setup := xproto.Setup(c)
+	if setup == nil || len(setup.Roots) == 0 {
+		c.Close()
+		return fmt.Errorf("xgb setup roots is empty")
+	}
+	screen := setup.DefaultScreen(c)
+	captureConn = c
+	captureRoot = screen.Root
+	captureW = screen.WidthInPixels
+	captureH = screen.HeightInPixels
+	return nil
+}
 
-	if os.Getenv("XAUTHORITY") == "" {
-		candidates := []string{}
-		patterns := []string{
-			"/home/*/.Xauthority",
-			"/run/user/*/gdm/Xauthority",
-			"/run/user/*/Xauthority",
-			"/var/run/lightdm/root/:*",
-			"/var/run/lightdm/root/*",
-			"/root/.Xauthority",
-		}
-		for _, pat := range patterns {
-			matches, _ := filepath.Glob(pat)
-			candidates = append(candidates, matches...)
-		}
-
-		for _, path := range candidates {
-			if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Size() > 0 {
-				os.Setenv("XAUTHORITY", path)
-				log.Printf("[screen-monitor] auto-detected XAUTHORITY=%s", path)
-				break
-			}
-		}
+func resetCaptureConn() {
+	if captureConn != nil {
+		captureConn.Close()
+		captureConn = nil
 	}
 }
 
-// captureScreen captures the active display screen.
-func captureScreen() (image.Image, error) {
-	prepareX11Env()
-
-	c, err := xgb.NewConn()
-	if err != nil {
-		return nil, fmt.Errorf("xgb conn: %w", err)
+// captureScreenLocked grabs the root window over the shared connection. The
+// RGBA backing buffer is reused between calls to avoid per-frame allocation.
+// Caller must hold captureMu and fully consume the result before releasing it,
+// since the buffer is overwritten on the next call.
+func captureScreenLocked() (image.Image, error) {
+	if err := ensureCaptureConn(); err != nil {
+		return nil, err
 	}
-	defer c.Close()
 
-	setup := xproto.Setup(c)
-	if setup == nil || len(setup.Roots) == 0 {
-		return nil, fmt.Errorf("xgb setup roots is empty")
-	}
-	screen := setup.DefaultScreen(c)
-
-	width := screen.WidthInPixels
-	height := screen.HeightInPixels
-
-	// Request the image from the Root window
-	xImg, err := xproto.GetImage(c, xproto.ImageFormatZPixmap, xproto.Drawable(screen.Root),
+	width, height := captureW, captureH
+	xImg, err := xproto.GetImage(captureConn, xproto.ImageFormatZPixmap, xproto.Drawable(captureRoot),
 		0, 0, width, height, 0xffffffff).Reply()
 	if err != nil {
+		// Connection likely died (X restart / session change); drop it so the
+		// next call reconnects instead of failing forever.
+		resetCaptureConn()
 		return nil, fmt.Errorf("xproto.GetImage: %w", err)
 	}
 
@@ -110,18 +103,21 @@ func captureScreen() (image.Image, error) {
 		return nil, fmt.Errorf("xproto.GetImage returned data length %d, expected at least %d", len(data), expectedLen)
 	}
 
-	// Swap Blue and Red channels to convert BGRA to RGBA, and force opaque alpha
+	// Swap Blue and Red channels to convert BGRA to RGBA, and force opaque alpha.
 	for i := 0; i < expectedLen; i += 4 {
 		data[i], data[i+2] = data[i+2], data[i]
 		data[i+3] = 255
 	}
 
-	img := &image.RGBA{
-		Pix:    data[:expectedLen],
-		Stride: 4 * int(width),
-		Rect:   image.Rect(0, 0, int(width), int(height)),
+	// Reuse the backing image unless the resolution changed.
+	if captureRGBA == nil || captureRGBA.Rect.Dx() != int(width) || captureRGBA.Rect.Dy() != int(height) {
+		captureRGBA = &image.RGBA{
+			Stride: 4 * int(width),
+			Rect:   image.Rect(0, 0, int(width), int(height)),
+		}
 	}
-	return img, nil
+	captureRGBA.Pix = data[:expectedLen]
+	return captureRGBA, nil
 }
 
 // resizeImage scales down the image to fit max width.
@@ -132,15 +128,20 @@ func resizeImage(src image.Image, width, height int) *image.RGBA {
 }
 
 // captureScreenJPEG captures the screen, resizes it depending on resolution mode, and encodes to JPEG.
+// The whole capture+encode runs under captureMu so concurrent viewers can't
+// race on the shared backing buffer.
 func captureScreenJPEG(highRes bool) ([]byte, error) {
-	img, err := captureScreen()
+	captureMu.Lock()
+	defer captureMu.Unlock()
+
+	img, err := captureScreenLocked()
 	if err != nil {
 		return nil, err
 	}
 
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-	
+
 	var quality int
 	if highRes {
 		// High Resolution: scale up to 1920 width, high quality (80)

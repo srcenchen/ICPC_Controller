@@ -12,14 +12,14 @@ type BroadcastFont struct {
 
 // BroadcastPage represents a single page within a broadcast mode.
 type BroadcastPage struct {
-	ID         int64            `json:"id"`
-	Mode       string            `json:"mode"` // before, contesting, after
-	Title      string            `json:"title"`
-	SortOrder  int               `json:"sort_order"`
-	DurationMs int               `json:"duration_ms"` // 0 = manual advance
-	BgColor    string            `json:"bg_color"`
-	Transition string            `json:"transition"`
-	Items      []BroadcastItem   `json:"items,omitempty"`
+	ID         int64           `json:"id"`
+	Mode       string          `json:"mode"` // before, contesting, after
+	Title      string          `json:"title"`
+	SortOrder  int             `json:"sort_order"`
+	DurationMs int             `json:"duration_ms"` // 0 = manual advance
+	BgColor    string          `json:"bg_color"`
+	Transition string          `json:"transition"`
+	Items      []BroadcastItem `json:"items,omitempty"`
 }
 
 // BroadcastItem represents a draggable element on a broadcast page.

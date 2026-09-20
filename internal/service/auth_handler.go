@@ -16,7 +16,12 @@ import (
 type RateLimitEntry struct {
 	Attempts     int
 	BlockedUntil time.Time
+	LastSeen     time.Time
 }
+
+// rateLimitEntryTTL is how long an idle IP entry is kept before eviction.
+// Without this the entries map grew for the process lifetime.
+const rateLimitEntryTTL = 30 * time.Minute
 
 // LoginRateLimiter enforces brute-force protection.
 type LoginRateLimiter struct {
@@ -37,10 +42,12 @@ func (l *LoginRateLimiter) Allow(ip string) (bool, time.Duration) {
 	defer l.mu.Unlock()
 
 	now := time.Now()
+	l.sweepLocked(now)
 	entry, exists := l.entries[ip]
 	if !exists {
 		return true, 0
 	}
+	entry.LastSeen = now
 
 	if entry.BlockedUntil.After(now) {
 		return false, entry.BlockedUntil.Sub(now)
@@ -60,11 +67,13 @@ func (l *LoginRateLimiter) RecordFailure(ip string) (int, time.Duration) {
 	defer l.mu.Unlock()
 
 	now := time.Now()
+	l.sweepLocked(now)
 	entry, exists := l.entries[ip]
 	if !exists {
 		entry = &RateLimitEntry{}
 		l.entries[ip] = entry
 	}
+	entry.LastSeen = now
 
 	entry.Attempts++
 	if entry.Attempts >= 5 {
@@ -82,6 +91,22 @@ func (l *LoginRateLimiter) RecordSuccess(ip string) {
 	defer l.mu.Unlock()
 
 	delete(l.entries, ip)
+}
+
+// sweepLocked evicts idle, unblocked entries. Caller must hold l.mu.
+func (l *LoginRateLimiter) sweepLocked(now time.Time) {
+	for ip, e := range l.entries {
+		if e.BlockedUntil.After(now) {
+			continue
+		}
+		last := e.LastSeen
+		if last.IsZero() {
+			last = e.BlockedUntil
+		}
+		if now.Sub(last) > rateLimitEntryTTL {
+			delete(l.entries, ip)
+		}
+	}
 }
 
 func getClientIP(r *http.Request) string {
@@ -232,12 +257,18 @@ func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Exclude public paths
+		// Exclude public paths (display screens need read-only broadcast data without admin login)
 		if path == "/login.html" ||
 			path == "/api/auth/login" ||
+			path == "/install.sh" ||
+			path == "/download/client" ||
 			strings.HasPrefix(path, "/assets/") ||
 			strings.HasPrefix(path, "/broadcast/") ||
-			path == "/ws/broadcast" {
+			path == "/ws/broadcast" ||
+			(r.Method == http.MethodGet && (path == "/api/broadcast/pages" ||
+				path == "/api/broadcast/config" ||
+				path == "/api/broadcast/fonts" ||
+				path == "/api/broadcast/config/countdown")) {
 			next.ServeHTTP(w, r)
 			return
 		}

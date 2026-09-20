@@ -111,7 +111,8 @@ func (r *DeviceRepo) GetByAssignedID(assignedID int) (*model.Device, error) {
 		cpu_packages, gpu_info, memory_total, memory_used, disk_info, local_ip,
 		de_name, wm_name, shell, terminal, display_info, uptime, packages,
 		fastfetch_raw, connected, last_seen, first_seen, updated_at,
-		checkin_status, student_name, student_num, checkin_time, checkout_time
+		checkin_status, student_name, student_num, checkin_time, checkout_time,
+		cpu_pct, mem_pct, disk_pct, temp_c, load1, health_at, client_version
 	FROM devices WHERE assigned_id=?`
 
 	d := &model.Device{}
@@ -123,6 +124,7 @@ func (r *DeviceRepo) GetByAssignedID(assignedID int) (*model.Device, error) {
 		&d.DEName, &d.WMName, &d.Shell, &d.Terminal, &d.DisplayInfo, &d.Uptime, &d.Packages,
 		&d.FastfetchRaw, &connected, &d.LastSeen, &d.FirstSeen, &d.UpdatedAt,
 		&d.CheckinStatus, &d.StudentName, &d.StudentNum, &d.CheckinTime, &d.CheckoutTime,
+		&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get device by assigned_id %d: %w", assignedID, err)
@@ -142,7 +144,8 @@ func (r *DeviceRepo) GetByMacAddress(mac string) (*model.Device, error) {
 		cpu_packages, gpu_info, memory_total, memory_used, disk_info, local_ip,
 		de_name, wm_name, shell, terminal, display_info, uptime, packages,
 		fastfetch_raw, connected, last_seen, first_seen, updated_at,
-		checkin_status, student_name, student_num, checkin_time, checkout_time
+		checkin_status, student_name, student_num, checkin_time, checkout_time,
+		cpu_pct, mem_pct, disk_pct, temp_c, load1, health_at, client_version
 	FROM devices WHERE mac_address=?`
 
 	d := &model.Device{}
@@ -154,6 +157,7 @@ func (r *DeviceRepo) GetByMacAddress(mac string) (*model.Device, error) {
 		&d.DEName, &d.WMName, &d.Shell, &d.Terminal, &d.DisplayInfo, &d.Uptime, &d.Packages,
 		&d.FastfetchRaw, &connected, &d.LastSeen, &d.FirstSeen, &d.UpdatedAt,
 		&d.CheckinStatus, &d.StudentName, &d.StudentNum, &d.CheckinTime, &d.CheckoutTime,
+		&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get device by mac %s: %w", mac, err)
@@ -166,7 +170,8 @@ func (r *DeviceRepo) GetByMacAddress(mac string) (*model.Device, error) {
 func (r *DeviceRepo) GetAll() ([]model.DeviceSummary, error) {
 	query := `SELECT assigned_id, hostname, username, os_name, cpu_model,
 		memory_total, memory_used, local_ip, connected, last_seen,
-		checkin_status, student_name, student_num
+		checkin_status, student_name, student_num,
+		cpu_pct, mem_pct, disk_pct, temp_c, load1, health_at
 	FROM devices ORDER BY assigned_id`
 
 	rows, err := r.db.Query(query)
@@ -181,7 +186,8 @@ func (r *DeviceRepo) GetAll() ([]model.DeviceSummary, error) {
 		var connected int
 		if err := rows.Scan(&d.AssignedID, &d.Hostname, &d.Username, &d.OSName,
 			&d.CPUModel, &d.MemoryTotal, &d.MemoryUsed, &d.LocalIP, &connected, &d.LastSeen,
-			&d.CheckinStatus, &d.StudentName, &d.StudentNum); err != nil {
+			&d.CheckinStatus, &d.StudentName, &d.StudentNum,
+			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt); err != nil {
 			return nil, fmt.Errorf("scan device summary: %w", err)
 		}
 		d.Connected = connected != 0
@@ -200,7 +206,8 @@ func (r *DeviceRepo) GetAllFull() ([]model.Device, error) {
 		cpu_packages, gpu_info, memory_total, memory_used, disk_info, local_ip,
 		de_name, wm_name, shell, terminal, display_info, uptime, packages,
 		fastfetch_raw, connected, last_seen, first_seen, updated_at,
-		checkin_status, student_name, student_num, checkin_time, checkout_time
+		checkin_status, student_name, student_num, checkin_time, checkout_time,
+		cpu_pct, mem_pct, disk_pct, temp_c, load1, health_at, client_version
 		FROM devices ORDER BY assigned_id`
 
 	rows, err := r.db.Query(query)
@@ -220,6 +227,8 @@ func (r *DeviceRepo) GetAllFull() ([]model.Device, error) {
 			&d.DEName, &d.WMName, &d.Shell, &d.Terminal, &d.DisplayInfo, &d.Uptime, &d.Packages,
 			&d.FastfetchRaw, &connected, &d.LastSeen, &d.FirstSeen, &d.UpdatedAt,
 			&d.CheckinStatus, &d.StudentName, &d.StudentNum, &d.CheckinTime, &d.CheckoutTime,
+			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
+			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan full device: %w", err)
@@ -241,6 +250,37 @@ func (r *DeviceRepo) UpdateConnected(assignedID int, connected bool) error {
 		boolToInt(connected), now, now, assignedID,
 	)
 	return err
+}
+
+// UpdateHealth stores the latest heartbeat health metrics. Values below zero
+// mean "unsupported on this machine" and are stored as-is so the UI can tell
+// missing sensors apart from a real 0%.
+func (r *DeviceRepo) UpdateHealth(assignedID int, cpuPct, memPct, diskPct, tempC, load1 float64) error {
+	now := time.Now().Format(time.RFC3339)
+	_, err := r.db.Exec(
+		`UPDATE devices SET cpu_pct=?, mem_pct=?, disk_pct=?, temp_c=?, load1=?, health_at=?
+		 WHERE assigned_id=?`,
+		cpuPct, memPct, diskPct, tempC, load1, now, assignedID,
+	)
+	return err
+}
+
+// UpdateClientVersion records the client build the device is running.
+func (r *DeviceRepo) UpdateClientVersion(assignedID int, version string) error {
+	_, err := r.db.Exec(`UPDATE devices SET client_version=? WHERE assigned_id=?`, version, assignedID)
+	return err
+}
+
+// DeleteGhostRows removes placeholder rows left behind when a client registered
+// but dropped before sending system_info (hostname 'pending', empty MAC).
+func (r *DeviceRepo) DeleteGhostRows() (int64, error) {
+	res, err := r.db.Exec(
+		`DELETE FROM devices WHERE mac_address='' AND hostname IN ('pending','') AND connected=0`)
+	if err != nil {
+		return 0, fmt.Errorf("delete ghost rows: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // Delete removes a device record by assigned ID.
@@ -311,7 +351,8 @@ func (r *DeviceRepo) GetStats() (total int, online int, err error) {
 func (r *DeviceRepo) GetCheckinAll() ([]model.DeviceSummary, error) {
 	query := `SELECT assigned_id, hostname, username, os_name, cpu_model,
 		memory_total, memory_used, local_ip, connected, last_seen,
-		checkin_status, student_name, student_num
+		checkin_status, student_name, student_num,
+		cpu_pct, mem_pct, disk_pct, temp_c, load1, health_at
 	FROM devices ORDER BY assigned_id`
 
 	rows, err := r.db.Query(query)
@@ -326,7 +367,8 @@ func (r *DeviceRepo) GetCheckinAll() ([]model.DeviceSummary, error) {
 		var connected int
 		if err := rows.Scan(&d.AssignedID, &d.Hostname, &d.Username, &d.OSName,
 			&d.CPUModel, &d.MemoryTotal, &d.MemoryUsed, &d.LocalIP, &connected, &d.LastSeen,
-			&d.CheckinStatus, &d.StudentName, &d.StudentNum); err != nil {
+			&d.CheckinStatus, &d.StudentName, &d.StudentNum,
+			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt); err != nil {
 			return nil, fmt.Errorf("scan checkin device: %w", err)
 		}
 		d.Connected = connected != 0

@@ -15,12 +15,12 @@ type FastFetchEntry struct {
 
 // FFOSResult holds OS information from fastfetch.
 type FFOSResult struct {
-	Name        string `json:"name"`
-	PrettyName  string `json:"prettyName"`
-	Version     string `json:"version"`
-	VersionID   string `json:"versionID"`
-	ID          string `json:"id"`
-	Codename    string `json:"codename"`
+	Name       string `json:"name"`
+	PrettyName string `json:"prettyName"`
+	Version    string `json:"version"`
+	VersionID  string `json:"versionID"`
+	ID         string `json:"id"`
+	Codename   string `json:"codename"`
 }
 
 // FFCPUResult holds CPU information from fastfetch.

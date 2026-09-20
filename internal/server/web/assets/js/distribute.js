@@ -95,8 +95,8 @@ function renderSetupPage(files, suggestedIP) {
                 '<div class="panel-title">1. 文件管理</div>' +
                 
                 // Upload Form
-                '<div style="border: 1px dashed var(--border); border-radius: 8px; padding: 16px; text-align: center;">' +
-                    '<p style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;">向主服务器上传文件（支持大文件分块上传）</p>' +
+                '<div class="dropzone">' +
+                    '<p style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;">向主服务器上传文件（multipart）</p>' +
                     '<input type="file" id="upload-file-input" style="display:none;">' +
                     '<button class="btn btn-outline btn-sm" onclick="$(\'#upload-file-input\').click()">+ 选择并上传文件</button>' +
                     '<div id="upload-progress-container" style="display:none; margin-top:12px;">' +
@@ -125,7 +125,7 @@ function renderSetupPage(files, suggestedIP) {
                     '<button class="btn btn-sm btn-outline" onclick="selectAllFiles(true)">全选</button>' +
                     '<button class="btn btn-sm btn-outline" onclick="selectAllFiles(false)">取消全选</button>' +
                     '<button class="btn btn-sm btn-danger" onclick="deleteSelectedFiles()">删除选中</button>' +
-                    '<button class="btn btn-sm btn-danger" style="background:#8b0000;" onclick="clearAllServerFiles()">清空服务器</button>' +
+                    '<button class="btn btn-sm btn-danger" onclick="clearAllServerFiles()">清空服务器</button>' +
                 '</div>' +
 
                 // Save Directory Config
@@ -159,7 +159,7 @@ function renderSetupPage(files, suggestedIP) {
                     '<div id="device-selector-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 10px;"></div>' +
                 '</div>' +
                 '<div style="display:flex; flex-direction:column; gap:6px;">' +
-                    '<div class="panel-title" style="margin:0;">6. 分发后执行命令 (选填)</div>' +
+                    '<div class="panel-title" style="margin:0;">5. 分发后执行命令 (选填)</div>' +
                     '<textarea id="distribute-post-cmd-editor"></textarea>' +
                     '<small style="color:var(--text-secondary); font-size:11px; margin-top:2px;">文件下载成功后在选手端自动执行。运行的工作目录为上述目标保存目录。</small>' +
                 '</div>' +
@@ -351,15 +351,28 @@ function updateActiveTaskUI(task) {
     if (!tbody.length) return;
 
     var progresses = Object.values(task.progresses || {});
-    // Sort by device_id
-    progresses.sort(function(a, b) { return a.device_id - b.device_id; });
+    // Failed/stalled first, then by device_id
+    progresses.sort(function(a, b) {
+        var rank = function(s) {
+            if (s === "failed" || s === "stalled") return 0;
+            if (s === "cancelled") return 1;
+            if (s === "downloading") return 2;
+            if (s === "idle") return 3;
+            return 4;
+        };
+        var ra = rank(a.status), rb = rank(b.status);
+        if (ra !== rb) return ra - rb;
+        return a.device_id - b.device_id;
+    });
 
     var totalDevices = progresses.length;
     var completedDevices = 0;
     var failedDevices = 0;
+    var sumPct = 0;
 
     var rowsHtml = progresses.map(function(p) {
         var pct = Math.round(p.percentage || 0);
+        sumPct += (p.percentage || 0);
         var speed = p.speed_mbps > 0 ? (p.speed_mbps + " Mbps") : "-";
         
         var statusClass = "badge-running";
@@ -370,18 +383,22 @@ function updateActiveTaskUI(task) {
             completedDevices++;
         } else if (p.status === "failed") {
             statusClass = "badge-failed";
-            statusLabel = "失败 ❌";
+            statusLabel = "失败";
+            failedDevices++;
+        } else if (p.status === "stalled") {
+            statusClass = "badge-timeout";
+            statusLabel = "卡住";
             failedDevices++;
         } else if (p.status === "cancelled") {
             statusClass = "badge-failed";
-            statusLabel = "已取消 ⚠️";
+            statusLabel = "已取消";
         } else if (p.status === "idle") {
             statusClass = "badge-pending";
             statusLabel = "等待中";
         }
 
-        var isFailed = p.status === "failed";
-        var actionBtn = isFailed
+        var canRetry = p.status === "failed" || p.status === "stalled" || p.status === "cancelled";
+        var actionBtn = canRetry
             ? '<button class="btn btn-sm btn-primary btn-outline" style="padding:2px 8px;font-size:11px;" onclick="retryDeviceDistribution(' + p.device_id + ')">重新分发</button>'
             : '-';
 
@@ -392,7 +409,7 @@ function updateActiveTaskUI(task) {
 
         // Progress bar inside table cell
         var pBar = '<div class="mem-bar" style="height: 14px;">' +
-            '<div class="mem-bar-fill ' + (isFailed ? 'critical' : '') + '" style="width:' + pct + '%"></div>' +
+            '<div class="mem-bar-fill ' + (canRetry ? 'critical' : '') + '" style="width:' + pct + '%"></div>' +
             '<div class="mem-bar-text" style="line-height: 14px; font-size:10px;">' + pct + '%' + chunksLabel + '</div>' +
             '</div>';
 
@@ -409,15 +426,19 @@ function updateActiveTaskUI(task) {
 
     tbody.html(rowsHtml);
 
-    // Update overall progress bar
-    var overallPct = totalDevices > 0 ? Math.round((completedDevices / totalDevices) * 100) : 0;
+    // Overall progress = average percentage across devices (more accurate than completion count)
+    var overallPct = totalDevices > 0 ? Math.round(sumPct / totalDevices) : 0;
     $("#task-overall-progress").css("width", overallPct + "%");
-    var progressText = "终端分发完成度: " + completedDevices + " / " + totalDevices;
-    if (failedDevices > 0) {
-        progressText += " | 失败: " + failedDevices + " 台";
+    var fileLabel = task.active_file ? ("文件: " + task.active_file + "  |  ") : "";
+    if (task.files && task.files.length > 1) {
+        fileLabel = "文件 " + ((task.active_idx || 0) + 1) + "/" + task.files.length + " (" + (task.active_file || "") + ")  |  ";
     }
-    if (overallPct === 100) {
-        progressText += " ✓ 全部分发完成";
+    var progressText = fileLabel + "平均进度 " + overallPct + "%  |  完成 " + completedDevices + " / " + totalDevices;
+    if (failedDevices > 0) {
+        progressText += " | 失败/卡住: " + failedDevices + " 台";
+    }
+    if (completedDevices === totalDevices && totalDevices > 0) {
+        progressText += " ✓ 全部完成";
         $("#task-overall-progress").addClass("high");
     }
     $("#task-overall-text").text(progressText);

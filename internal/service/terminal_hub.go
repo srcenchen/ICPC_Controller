@@ -2,8 +2,8 @@ package service
 
 import (
 	"log"
-	"time"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )

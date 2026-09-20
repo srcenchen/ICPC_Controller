@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ICPCRemoteControl/internal/data"
@@ -15,11 +16,24 @@ import (
 
 // ClientConn wraps a TCP connection from a contestant machine.
 type ClientConn struct {
-	AssignedID      int
-	Conn            net.Conn
-	Send            chan []byte // serialized write channel
-	Hub             *Hub
-	LastSeenUpdated time.Time
+	AssignedID int
+	Conn       net.Conn
+	Send       chan []byte // serialized write channel
+	Hub        *Hub
+	// lastSeenUpdated is unix nanos of the last last_seen DB write. The struct
+	// is shared with the hub, so keep the access atomic.
+	lastSeenUpdated atomic.Int64
+}
+
+// ShouldUpdateLastSeen reports whether enough time has passed to write
+// last_seen again, and claims the slot when it returns true.
+func (c *ClientConn) ShouldUpdateLastSeen(minInterval time.Duration) bool {
+	now := time.Now()
+	prev := c.lastSeenUpdated.Load()
+	if prev != 0 && now.Sub(time.Unix(0, prev)) <= minInterval {
+		return false
+	}
+	return c.lastSeenUpdated.CompareAndSwap(prev, now.UnixNano())
 }
 
 // AdminConn wraps an admin browser WebSocket connection.
@@ -39,6 +53,26 @@ type Hub struct {
 	adminReg   chan *AdminConn
 	adminUnreg chan *AdminConn
 	deviceRepo *data.DeviceRepo
+	eventRepo  *data.DeviceEventRepo
+}
+
+// SetEventRepo enables online/offline history recording.
+func (h *Hub) SetEventRepo(r *data.DeviceEventRepo) {
+	h.mu.Lock()
+	h.eventRepo = r
+	h.mu.Unlock()
+}
+
+func (h *Hub) recordEvent(assignedID int, event, detail string) {
+	h.mu.RLock()
+	repo := h.eventRepo
+	h.mu.RUnlock()
+	if repo == nil {
+		return
+	}
+	if err := repo.Add(assignedID, event, detail); err != nil {
+		log.Printf("[hub] record %s event for device %d: %v", event, assignedID, err)
+	}
 }
 
 // NewHub creates a new Hub and starts its run loop.
@@ -62,26 +96,42 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
+			if old, ok := h.clients[client.AssignedID]; ok && old != client {
+				// Replace stale connection: stop its write pump and close TCP.
+				close(old.Send)
+				old.Conn.Close()
+			}
 			h.clients[client.AssignedID] = client
 			h.mu.Unlock()
 			if err := h.deviceRepo.UpdateConnected(client.AssignedID, true); err != nil {
 				log.Printf("[hub] failed to mark device %d online: %v", client.AssignedID, err)
 			}
 			log.Printf("[hub] device %d connected", client.AssignedID)
+			h.recordEvent(client.AssignedID, "online", client.Conn.RemoteAddr().String())
 			h.broadcastAdminEvent("device_connected", map[string]interface{}{
 				"assigned_id": client.AssignedID,
 			})
 
 		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[client.AssignedID]; ok {
+			current, ok := h.clients[client.AssignedID]
+			// Only remove if this is still the active connection (reconnect-safe).
+			removed := false
+			if ok && current == client {
 				delete(h.clients, client.AssignedID)
+				close(client.Send)
+				removed = true
 			}
 			h.mu.Unlock()
+			if !removed {
+				// Stale unregister after reconnect — do not mark offline.
+				continue
+			}
 			if err := h.deviceRepo.UpdateConnected(client.AssignedID, false); err != nil {
 				log.Printf("[hub] failed to mark device %d offline: %v", client.AssignedID, err)
 			}
 			log.Printf("[hub] device %d disconnected", client.AssignedID)
+			h.recordEvent(client.AssignedID, "offline", "")
 			h.broadcastAdminEvent("device_disconnected", map[string]interface{}{
 				"assigned_id": client.AssignedID,
 			})
@@ -139,6 +189,33 @@ func (h *Hub) OnlineCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// OnlineIDs returns assigned IDs of all currently connected clients.
+func (h *Hub) OnlineIDs() []int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]int, 0, len(h.clients))
+	for id := range h.clients {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TrySend attempts a non-blocking send to a client. Returns false if offline or buffer full.
+func (h *Hub) TrySend(assignedID int, data []byte) bool {
+	h.mu.RLock()
+	client := h.clients[assignedID]
+	h.mu.RUnlock()
+	if client == nil {
+		return false
+	}
+	select {
+	case client.Send <- data:
+		return true
+	default:
+		return false
+	}
 }
 
 // BroadcastToClients sends a message to all connected TCP clients.

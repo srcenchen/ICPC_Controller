@@ -87,7 +87,7 @@ func GetChunk(conn net.Conn, data []byte, tool ToolSession) {
 		tool.CloseConn(conn)
 		return
 	}
-	
+
 	// 如果是发送主机（主节点），需要限流控制以防止局域网高并发冲垮磁盘或网络带宽
 	if tool.IsMain() {
 		if err := tool.AcquireUploadSlot(); err != nil {

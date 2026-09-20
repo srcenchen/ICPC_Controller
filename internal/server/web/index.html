@@ -3,11 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2563eb">
     <title>ICPC 远程集控</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+    <!-- Apply persisted theme before first paint to avoid a flash. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("icpc-theme");
+          if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+        } catch (e) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/assets/css/style.css">
     <link rel="stylesheet" href="/assets/css/codemirror.min.css">
     <link rel="stylesheet" href="/assets/css/eclipse.min.css">
-    <!-- xterm.js for terminal -->
     <link rel="stylesheet" href="/assets/css/xterm.css" />
     <script src="/assets/js/xterm.js"></script>
     <script src="/assets/js/xterm-addon-fit.js"></script>
@@ -17,27 +27,40 @@
     <script src="/assets/js/interact.min.js"></script>
 </head>
 <body>
-    <nav id="navbar">
-        <div class="nav-brand">ICPC 远程集控</div>
-        <ul class="nav-links">
-            <li><a href="#dashboard" class="nav-link active" data-page="dashboard">仪表盘</a></li>
-            <li><a href="#devices" class="nav-link" data-page="devices">设备管理</a></li>
-            <li><a href="#checkin" class="nav-link" data-page="checkin">签到管理</a></li>
-            <li><a href="#commands" class="nav-link" data-page="commands">命令执行</a></li>
-            <li><a href="#network" class="nav-link" data-page="network">网络屏蔽</a></li>
-            <li><a href="#broadcast" class="nav-link" data-page="broadcast">广播管理</a></li>
-            <li><a href="#screen" class="nav-link" data-page="screen">选手屏幕</a></li>
-            <li><a href="#distribute" class="nav-link" data-page="distribute">文件分发</a></li>
-            <li><a href="#settings" class="nav-link" data-page="settings">系统设置</a></li>
-            <li><a href="#" id="btn-logout" class="nav-link logout-link">退出登录</a></li>
-        </ul>
-        <div id="status-bar">
-            <span id="online-count">在线: 0</span> /
-            <span id="total-count">总计: 0</span>
+    <div class="app">
+        <aside id="sidebar">
+            <div class="nav-brand"><span class="brand-mark">IC</span><span>ICPC 集控</span></div>
+            <ul class="nav-links">
+                <li class="nav-group-label">监控</li>
+                <li><a href="#dashboard" class="nav-link active" data-page="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>仪表盘</span></a></li>
+                <li><a href="#devices" class="nav-link" data-page="devices"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>设备</span></a></li>
+                <li><a href="#screen" class="nav-link" data-page="screen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="1"/><path d="M8 20h8"/></svg><span>屏幕</span></a></li>
+                <li class="nav-group-label">运维</li>
+                <li><a href="#commands" class="nav-link" data-page="commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6M12 19h8"/></svg><span>命令</span></a></li>
+                <li><a href="#network" class="nav-link" data-page="network"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 010 20a15 15 0 010-20"/></svg><span>网络</span></a></li>
+                <li><a href="#distribute" class="nav-link" data-page="distribute"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/></svg><span>分发</span></a></li>
+                <li><a href="#power" class="nav-link" data-page="power"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10M18.4 6.6a9 9 0 11-12.8 0"/></svg><span>电源</span></a></li>
+                <li class="nav-group-label">比赛</li>
+                <li><a href="#checkin" class="nav-link" data-page="checkin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg><span>签到</span></a></li>
+                <li><a href="#broadcast" class="nav-link" data-page="broadcast"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l18-5v12L3 14v-3zM11.6 16.8a3 3 0 11-5.8-1.6"/></svg><span>广播</span></a></li>
+                <li class="nav-group-label">系统</li>
+                <li><a href="#settings" class="nav-link" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg><span>设置</span></a></li>
+                <li><a href="#" id="btn-logout" class="nav-link logout-link"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg><span>退出</span></a></li>
+            </ul>
+        </aside>
+        <div class="app-main">
+            <header id="topbar">
+                <div id="topbar-title">仪表盘</div>
+                <div id="status-bar">
+                    <span class="conn-dot" id="conn-dot" title="实时连接状态">实时</span>
+                    <span id="online-count">在线: 0</span>
+                    <span id="total-count">总计: 0</span>
+                    <button id="theme-toggle" title="切换深浅色主题" aria-label="切换主题"></button>
+                </div>
+            </header>
+            <main id="content"></main>
         </div>
-    </nav>
-
-    <main id="content"></main>
+    </div>
 
     <script src="/assets/js/app.js"></script>
     <script src="/assets/js/dashboard.js"></script>
@@ -50,6 +73,7 @@
     <script src="/assets/js/broadcast.js"></script>
     <script src="/assets/js/screen.js"></script>
     <script src="/assets/js/distribute.js"></script>
+    <script src="/assets/js/power.js"></script>
     <script src="/assets/js/settings.js"></script>
 </body>
 </html>

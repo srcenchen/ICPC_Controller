@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 
+	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/data"
 
 	"golang.org/x/crypto/bcrypt"
@@ -43,6 +44,28 @@ type ServerSettings struct {
 	NetworkRules         []NetworkRule   `json:"network_rules"`
 	CheckinCfg           CheckinConfig   `json:"checkin_config"`
 	ScreenMonitorEnabled bool            `json:"screen_monitor_enabled"`
+	Maintenance          MaintenanceCfg  `json:"maintenance"`
+}
+
+// MaintenanceCfg controls log retention and health alert thresholds.
+type MaintenanceCfg struct {
+	CmdRetentionDays  int     `json:"cmd_retention_days"`  // 0 = keep forever
+	CmdRetentionMax   int     `json:"cmd_retention_max"`   // 0 = unlimited top-level records
+	EventRetentionDay int     `json:"event_retention_day"` // device online/offline history
+	DiskAlertPct      float64 `json:"disk_alert_pct"`
+	TempAlertC        float64 `json:"temp_alert_c"`
+	MemAlertPct       float64 `json:"mem_alert_pct"`
+}
+
+func defaultMaintenance() MaintenanceCfg {
+	return MaintenanceCfg{
+		CmdRetentionDays:  14,
+		CmdRetentionMax:   5000,
+		EventRetentionDay: 30,
+		DiskAlertPct:      90,
+		TempAlertC:        85,
+		MemAlertPct:       92,
+	}
 }
 
 // defaultPresets returns the built-in preset commands.
@@ -90,6 +113,30 @@ func defaultPresets() []PresetCommand {
 			Command: "timedatectl set-ntp true 2>/dev/null && echo 'NTP 已启用' || echo '时间同步设置失败'",
 			Color:   "primary",
 		},
+		{
+			Name:    "禁用U盘",
+			Desc:    "屏蔽 USB 存储设备（考试完整性）",
+			Command: "mkdir -p /etc/udev/rules.d && printf '%s\\n' 'SUBSYSTEM==\"block\", ENV{ID_BUS}==\"usb\", ENV{UDISKS_IGNORE}=\"1\", RUN+=\"/bin/sh -c \\'echo 1 > /sys$devpath/../remove\\'\"' > /etc/udev/rules.d/98-icpc-usb.rules && udevadm control --reload-rules && echo 'USB 存储已禁用（已插入的设备需重新插拔）'",
+			Color:   "danger",
+		},
+		{
+			Name:    "恢复U盘",
+			Desc:    "解除 USB 存储限制",
+			Command: "rm -f /etc/udev/rules.d/98-icpc-usb.rules && udevadm control --reload-rules && echo 'USB 存储已恢复'",
+			Color:   "success",
+		},
+		{
+			Name:    "清空剪贴板",
+			Desc:    "清除图形会话剪贴板内容",
+			Command: "for u in $(loginctl list-sessions --no-legend | awk '{print $3}' | sort -u); do for d in :0 :1; do su - \"$u\" -c \"DISPLAY=$d xsel -bc\" 2>/dev/null || su - \"$u\" -c \"DISPLAY=$d xclip -selection clipboard /dev/null\" 2>/dev/null; done; done; echo '剪贴板已清理（需要 xsel 或 xclip）'",
+			Color:   "warning",
+		},
+		{
+			Name:    "进程快照",
+			Desc:    "查看占用资源最高的进程",
+			Command: "top -bn1 | head -25",
+			Color:   "primary",
+		},
 	}
 }
 
@@ -109,6 +156,7 @@ const (
 	settingKeyNetworkRules         = "network_rules"
 	settingKeyCheckinConfig        = "checkin_config"
 	settingKeyScreenMonitorEnabled = "screen_monitor_enabled"
+	settingKeyMaintenance          = "maintenance"
 )
 
 // NewServerSettings creates a new ServerSettings, loading persisted values from the
@@ -127,6 +175,7 @@ func NewServerSettings(prefix string, repo *data.SettingsRepo) *ServerSettings {
 			PostCheckoutMsg: "签退成功，您的电脑将在1分钟后自动关机。",
 		},
 		ScreenMonitorEnabled: false,
+		Maintenance:          defaultMaintenance(),
 	}
 
 	// Load persisted values from DB, falling back to defaults.
@@ -164,7 +213,39 @@ func (s *ServerSettings) loadFromDB() {
 	if raw, err := s.settingsRepo.Get(settingKeyScreenMonitorEnabled); err == nil && raw != "" {
 		s.ScreenMonitorEnabled = raw == "true"
 	}
+	if raw, err := s.settingsRepo.Get(settingKeyMaintenance); err == nil && raw != "" {
+		cfg := defaultMaintenance()
+		if json.Unmarshal([]byte(raw), &cfg) == nil {
+			s.Maintenance = cfg
+		}
+	}
 	log.Printf("[settings] loaded persisted settings from database")
+}
+
+// MaintenanceForJanitor implements biz.MaintenanceProvider.
+func (s *ServerSettings) MaintenanceForJanitor() biz.MaintenanceConfig {
+	cfg := s.GetMaintenance()
+	return biz.MaintenanceConfig{
+		CmdRetentionDays:  cfg.CmdRetentionDays,
+		CmdRetentionMax:   cfg.CmdRetentionMax,
+		EventRetentionDay: cfg.EventRetentionDay,
+	}
+}
+
+// GetMaintenance returns retention/alert configuration.
+func (s *ServerSettings) GetMaintenance() MaintenanceCfg {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Maintenance
+}
+
+// SetMaintenance updates retention/alert configuration and persists it.
+func (s *ServerSettings) SetMaintenance(cfg MaintenanceCfg) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Maintenance = cfg
+	raw, _ := json.Marshal(cfg)
+	s.persist(settingKeyMaintenance, string(raw))
 }
 
 // persist saves a setting key-value pair to the database. Errors are logged but not
@@ -259,6 +340,7 @@ func (s *ServerSettings) Snapshot() ServerSettings {
 		NetworkRules:         rules,
 		CheckinCfg:           s.CheckinCfg,
 		ScreenMonitorEnabled: s.ScreenMonitorEnabled,
+		Maintenance:          s.Maintenance,
 	}
 }
 
