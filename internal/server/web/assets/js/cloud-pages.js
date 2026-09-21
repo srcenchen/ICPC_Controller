@@ -7,7 +7,7 @@ function isCloudAllRooms() {
 }
 
 function fleetDeviceSelectorHTML() {
-    return '<section class="settings-card"><h3>目标设备</h3><div class="ops-toolbar"><select id="fleet-room" aria-label="机房筛选"><option value="">全部机房</option></select><input type="search" id="fleet-search" placeholder="搜索机房、设备号、主机名、选手"><button class="btn btn-outline" id="fleet-select-online">选择筛选内在线设备</button><button class="btn btn-outline" id="fleet-select-all">选择全部筛选设备</button><button class="btn btn-outline" id="fleet-clear">清空选择</button></div><p id="fleet-selection-count" class="settings-desc"></p><div class="table-container"><table><thead><tr><th>选择</th><th>机房 / 设备号</th><th>主机名 / 系统</th><th>健康</th><th>选手</th><th>签到</th><th>状态</th><th>操作</th></tr></thead><tbody id="fleet-devices"></tbody></table></div></section>';
+    return '<section class="settings-card"><h3>目标设备</h3><p class="settings-desc">先用「机房筛选」缩小范围，再点选择按钮；筛选不会自动清除已选设备。仅当选中「全部机房」的全部设备时，才按全设备处理并进入操作快照，否则只发给所选设备。</p><div class="ops-toolbar"><select id="fleet-room" aria-label="机房筛选"><option value="">全部机房</option></select><input type="search" id="fleet-search" placeholder="搜索机房、设备号、主机名、选手"><button class="btn btn-outline" id="fleet-select-online">选择筛选内在线设备</button><button class="btn btn-outline" id="fleet-select-all">选择全部筛选设备</button><button class="btn btn-outline" id="fleet-clear">清空选择</button></div><p id="fleet-selection-count" class="settings-desc"></p><div class="table-container"><table><thead><tr><th>选择</th><th>机房 / 设备号</th><th>主机名 / 系统</th><th>健康</th><th>选手</th><th>签到</th><th>状态</th><th>操作</th></tr></thead><tbody id="fleet-devices"></tbody></table></div></section>';
 }
 
 function bindFleetSelector() {

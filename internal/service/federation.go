@@ -846,10 +846,18 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 			manifest = append(manifest, RelayFile{Name: name, SHA256: digest, Size: info.Size()})
 		}
 	}
-	// When a cloud operation snapshot is active, every broadcast operation is
-	// recorded and applied to every room for all of its devices, so late rooms
-	// and late devices catch up without operator intervention.
-	snapshotActive := federation.snapshots != nil && federation.snapshots.Active() != nil
+	// Only an operation that targets every device of every room counts as a
+	// snapshot ("全设备") operation. A specific selection is sent precisely and
+	// is never globalised, even while a snapshot is active.
+	snapshotActive := false
+	if federation.snapshots != nil && federation.snapshots.Active() != nil {
+		all, err := federation.allDevicesSelected(request.RoomIDs, request.Targets)
+		if err != nil {
+			writeJSON(writer, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		snapshotActive = all
+	}
 	if snapshotActive {
 		rooms, err := federation.allRoomIDs()
 		if err != nil {
@@ -946,7 +954,7 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if federation.snapshots != nil {
+	if snapshotActive {
 		payload := SnapshotPayload{Rooms: request.RoomIDs}
 		summary := ""
 		switch request.Operation {
@@ -1006,6 +1014,45 @@ func (federation *Federation) deliverJobs() {
 			_ = connection.send(request)
 		}
 	}
+}
+
+// allDevicesSelected reports whether the request targets every device of every
+// known room. Only such operations are treated as global snapshot operations.
+func (federation *Federation) allDevicesSelected(roomIDs []string, targets map[string][]int) (bool, error) {
+	rows, err := federation.db.Query(`SELECT id, snapshot FROM cluster_rooms`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	selected := make(map[string]bool, len(roomIDs))
+	for _, id := range roomIDs {
+		selected[id] = true
+	}
+	totalDevices := 0
+	for rows.Next() {
+		var id, raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return false, err
+		}
+		var room RoomSnapshot
+		if json.Unmarshal([]byte(raw), &room) != nil || len(room.Devices) == 0 {
+			continue
+		}
+		if !selected[id] {
+			return false, nil
+		}
+		targetSet := make(map[int]bool, len(targets[id]))
+		for _, deviceID := range targets[id] {
+			targetSet[deviceID] = true
+		}
+		for _, device := range room.Devices {
+			if !targetSet[device.AssignedID] {
+				return false, nil
+			}
+		}
+		totalDevices += len(room.Devices)
+	}
+	return totalDevices > 0, rows.Err()
 }
 
 // allRoomIDs returns every known room id from the stored cluster snapshots.
