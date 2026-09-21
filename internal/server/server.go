@@ -68,6 +68,7 @@ func New(cfg Config) *Server {
 			mux.HandleFunc(method+" /api/cluster/rooms/{room}/proxy/{path...}", cfg.Federation.Proxy)
 		}
 		mux.HandleFunc("GET /ws/cluster/rooms/{room}/terminal/{id}", cfg.Federation.Terminal)
+		mux.HandleFunc("GET /api/cluster/rooms/{room}/screen/{id}", cfg.Federation.ScreenStream)
 	}
 	if cfg.BackupH != nil {
 		mux.HandleFunc("GET /api/data/backup", cfg.BackupH.Download)

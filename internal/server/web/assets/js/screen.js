@@ -14,18 +14,26 @@ function stopAllIOSLoops() {
     activeIOSLoops = [];
 }
 
-// Cloud room mirror streams screen frames through the relay, one JPEG per
-// request, so it must use the polling loop instead of a continuous MJPEG img.
+// iOS cannot render a continuous MJPEG stream, so it polls single frames.
+// Cloud room mirror uses a real streaming relay (multipart/x-mixed-replace).
 function useScreenFrameLoop() {
-    return isIOS() || (typeof isCloudRoomMirror === "function" && isCloudRoomMirror());
+    return isIOS();
 }
 
-function screenFrameURL(deviceId, hd) {
-    var query = "?hd=" + (hd ? "1" : "0") + "&single=1";
+function screenStreamURL(deviceId, hd) {
+    var query = "?hd=" + (hd ? "1" : "0");
     if (typeof isCloudRoomMirror === "function" && isCloudRoomMirror()) {
-        return "/api/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/proxy/devices/" + deviceId + "/screen" + query;
+        return "/api/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/screen/" + deviceId + query;
     }
     return "/api/devices/" + deviceId + "/screen" + query;
+}
+
+// Single-frame URL used by the iOS polling loop.
+function screenFrameURL(deviceId, hd) {
+    if (typeof isCloudRoomMirror === "function" && isCloudRoomMirror()) {
+        return "/api/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/proxy/devices/" + deviceId + "/screen?hd=" + (hd ? "1" : "0") + "&single=1";
+    }
+    return "/api/devices/" + deviceId + "/screen?hd=" + (hd ? "1" : "0") + "&single=1";
 }
 
 function startImageLoop(imgElement, deviceId, hd) {
@@ -171,12 +179,11 @@ function renderScreenDevices(devices) {
         } else if (!ip && !mirrored) {
             bodyHtml = '<div class="screen-placeholder">未知IP</div>';
         } else {
-            var proxyUrl = '/api/devices/' + d.assigned_id + '/screen';
             if (useScreenFrameLoop()) {
                 bodyHtml = '<img class="ios-screen-img" data-id="' + d.assigned_id + '" data-hd="0" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
                            '<div class="screen-placeholder screen-err" style="display:none;">无法连接屏幕流</div>';
             } else {
-                bodyHtml = '<img src="' + proxyUrl + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
+                bodyHtml = '<img src="' + screenStreamURL(d.assigned_id, false) + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
                            '<div class="screen-placeholder screen-err" style="display:none;">无法连接屏幕流</div>';
             }
         }
@@ -261,8 +268,7 @@ function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
     if (useScreenFrameLoop()) {
         html += '<img id="ios-large-img" data-id="' + assignedId + '" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
     } else {
-        var streamUrl = '/api/devices/' + assignedId + '/screen?hd=1';
-        html += '<img src="' + streamUrl + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
+        html += '<img src="' + screenStreamURL(assignedId, true) + '" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
     }
     
     html += '<div class="screen-placeholder screen-err" style="display:none;position:relative;">无法连接高分辨率屏幕流</div>' +

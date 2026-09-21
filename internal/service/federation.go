@@ -41,6 +41,7 @@ type FederationMessage struct {
 	DeviceID    int           `json:"device_id,omitempty"`
 	Cols        int           `json:"cols,omitempty"`
 	Rows        int           `json:"rows,omitempty"`
+	HD          bool          `json:"hd,omitempty"`
 	Type        string        `json:"type"`
 	ID          string        `json:"id,omitempty"`
 	Method      string        `json:"method,omitempty"`
@@ -75,6 +76,7 @@ type Federation struct {
 	connections   map[string]*relayConnection
 	pending       map[string]chan FederationMessage
 	terminals     map[string]chan FederationMessage
+	screens       map[string]chan FederationMessage
 	linkStatus    string
 	transferPhase string
 	pullMu        sync.Mutex
@@ -91,7 +93,7 @@ func (federation *Federation) SetSnapshotManager(snapshots *SnapshotManager) {
 
 func NewFederation(db *sql.DB, settings *ServerSettings, devices *data.DeviceRepo, distribution *DistributionManager, hub *biz.Hub) *Federation {
 	_, _ = db.Exec(`UPDATE cluster_receipts SET status='unknown' WHERE status='processing'`)
-	return &Federation{db: db, settings: settings, devices: devices, distribution: distribution, hub: hub, connections: make(map[string]*relayConnection), pending: make(map[string]chan FederationMessage), terminals: make(map[string]chan FederationMessage), linkStatus: "未连接", broadcastDir: broadcastDataDir}
+	return &Federation{db: db, settings: settings, devices: devices, distribution: distribution, hub: hub, connections: make(map[string]*relayConnection), pending: make(map[string]chan FederationMessage), terminals: make(map[string]chan FederationMessage), screens: make(map[string]chan FederationMessage), linkStatus: "未连接", broadcastDir: broadcastDataDir}
 }
 
 func (federation *Federation) ConfigureBroadcast(handler *BroadcastHandler, backup *BackupHandler) {
@@ -212,6 +214,18 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 				}
 			}
 			federation.mu.Unlock()
+		case "screen_opened", "screen_data", "screen_closed":
+			federation.mu.Lock()
+			stream := federation.screens[room.ID+":"+message.ID]
+			if stream != nil {
+				select {
+				case stream <- message:
+				default:
+					delete(federation.screens, room.ID+":"+message.ID)
+					close(stream)
+				}
+			}
+			federation.mu.Unlock()
 		case "snapshot":
 			if message.Snapshot != nil && message.Snapshot.ID == room.ID {
 				message.Snapshot.Name = room.Name
@@ -323,7 +337,10 @@ func allowedRelayRequest(method, path string) bool {
 	}
 	for _, prefix := range []string{"/api/devices", "/api/commands", "/api/checkin", "/api/network", "/api/power", "/api/distribution", "/api/snapshots"} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			if strings.HasSuffix(path, "/upload") || strings.HasSuffix(path, "/delete") || strings.HasSuffix(path, "/clear") {
+			// File uploads are large multipart bodies and are managed on the
+			// cloud (then distributed); delete/clear are allowed so a cloud
+			// admin can manage each room's cached file library in mirror mode.
+			if strings.HasSuffix(path, "/upload") {
 				return false
 			}
 			return true
@@ -452,8 +469,12 @@ func (federation *Federation) runRelay(ctx context.Context, cfg DeploymentConfig
 	conn.SetReadLimit(4 << 20)
 	workers := make(chan struct{}, 4)
 	terminalSessions := make(map[string]context.CancelFunc)
+	screenSessions := make(map[string]context.CancelFunc)
 	defer func() {
 		for _, stop := range terminalSessions {
+			stop()
+		}
+		for _, stop := range screenSessions {
 			stop()
 		}
 	}()
@@ -467,6 +488,10 @@ func (federation *Federation) runRelay(ctx context.Context, cfg DeploymentConfig
 			federation.linkStatus = "云端拒绝：" + string(request.Body)
 			federation.mu.Unlock()
 			return
+		}
+		if request.Type == "screen_open" || request.Type == "screen_close" {
+			federation.handleRelayScreen(sessionCtx, connection, request, screenSessions)
+			continue
 		}
 		if request.Type != "request" {
 			federation.handleRelayTerminal(sessionCtx, connection, request, terminalSessions)

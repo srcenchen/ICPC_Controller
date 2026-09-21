@@ -116,8 +116,8 @@ function navigateTo(page) {
     $("#topbar-title").text(PAGE_TITLES[page] || "ICPC 集控");
 
     if (page !== "screen") {
-        $("#screen-monitor-container img").attr("src", "about:blank");
-        $("#screen-modal-overlay img").attr("src", "about:blank");
+        $("#screen-monitor-container img").removeAttr("src");
+        $("#screen-modal-overlay img").removeAttr("src");
         $("#screen-modal-overlay").remove();
         if (typeof stopAllIOSLoops === "function") {
             stopAllIOSLoops();
