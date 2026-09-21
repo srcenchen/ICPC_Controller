@@ -35,7 +35,7 @@ function loadCloudPage(page) {
     if (page === 'devices' || page === 'checkin') html += '<button class="btn btn-outline" onclick="exportFleetCSV()">导出设备与签到 · CSV</button>';
     html += '</div>';
     if (page === 'dashboard') {
-        html += '<div id="cloud-dashboard-stats" class="stats-grid"></div><section class="settings-card"><h3>进行中任务</h3><div id="cloud-distributions"></div></section>' + cloudCommandHistoryHTML();
+        html += '<div id="cloud-dashboard-stats" class="stats-grid"></div><section class="settings-card"><h3>进行中任务</h3><div id="cloud-distributions"></div></section>' + snapshotPanelHTML() + cloudCommandHistoryHTML();
     } else {
         if (page === 'checkin') html += '<div id="checkin-stats-container"></div>';
         html += fleetDeviceSelectorHTML();
@@ -44,7 +44,14 @@ function loadCloudPage(page) {
         } else if (page === 'commands') {
             html += '<section class="settings-card"><h3>执行命令</h3><div id="cloud-presets" class="ops-toolbar"></div><textarea id="fleet-command" rows="6" style="width:100%" placeholder="例如：hostname && uptime"></textarea><div class="ops-toolbar"><button class="btn btn-primary" onclick="queueFleetOperation(\'command\')">向已选设备执行</button></div></section>' + cloudCommandHistoryHTML() + fleetJobsHTML();
         } else if (page === 'distribute') {
-            html += '<section class="settings-card"><h3>云端文件库</h3><p class="settings-desc">云端 → 中转（每个机房缓存一份，SHA-256 校验）→ 局域网 P2P。无需返回机房总览。</p><div class="ops-toolbar"><label class="btn btn-outline">上传文件 <input type="file" id="cloud-file-input"></label><span id="cloud-upload-status" role="status"></span></div><div id="fleet-files"></div><div class="ops-form"><label>选手机保存目录<input id="fleet-save-dir" value="/tmp/icpc-downloads"></label><label>全部文件完成后的命令<input id="fleet-post-cmd" placeholder="选填"></label></div><div class="ops-toolbar"><button class="btn btn-primary" onclick="queueFleetOperation(\'distribute\')">向已选设备分发</button></div></section><section class="settings-card"><h3>各机房分发进度</h3><div id="cloud-distributions"></div></section>' + fleetJobsHTML();
+            html += '<section class="settings-card"><h3>云端文件库</h3><p class="settings-desc">云端保存一份文件。开始分发后，每个机房从云端拉取（SHA-256 校验），再在机房内 P2P 分发到选手机；离线机房恢复后自动投递。</p>' +
+                '<div class="ops-toolbar"><label class="btn btn-outline">上传文件 <input type="file" id="cloud-file-input" style="display:none"></label><span id="cloud-upload-status" role="status" class="settings-desc"></span></div>' +
+                '<div id="cloud-upload-progress" class="mem-bar" style="display:none;margin:8px 0;"><div id="cloud-upload-fill" class="mem-bar-fill" style="width:0%"></div><div id="cloud-upload-text" class="mem-bar-text">0%</div></div>' +
+                '<div class="table-container" style="max-height:320px;overflow-y:auto;"><table><thead><tr><th style="width:40px;text-align:center;"><input type="checkbox" id="cloud-file-select-all"></th><th>文件名</th><th>大小</th><th>修改时间</th></tr></thead><tbody id="fleet-files"></tbody></table></div>' +
+                '<div class="ops-toolbar"><button class="btn btn-sm btn-outline" onclick="selectAllCloudFiles(true)">全选</button><button class="btn btn-sm btn-outline" onclick="selectAllCloudFiles(false)">取消全选</button><button class="btn btn-sm btn-danger" onclick="deleteSelectedCloudFiles()">删除选中</button><button class="btn btn-sm btn-danger" onclick="clearCloudFiles()">清空云端文件库</button></div>' +
+                '<div class="ops-form"><label>选手机保存目录<input id="fleet-save-dir" value="/tmp/icpc-downloads"></label><label>全部文件完成后的命令<input id="fleet-post-cmd" placeholder="选填"></label></div>' +
+                '<div class="ops-toolbar"><button class="btn btn-primary" onclick="queueFleetOperation(\'distribute\')">向已选设备分发</button></div></section>' +
+                '<section class="settings-card"><h3>各机房分发进度</h3><div id="cloud-distributions"></div></section>' + fleetJobsHTML();
         } else if (page === 'network') {
             html += '<section class="settings-card"><h3>统一白名单规则</h3><p class="settings-desc">在云端编辑规则，再下发到已选设备。不会使用空的本地设备列表。</p><div id="rules-list"></div><button id="btn-add-rule" class="btn btn-outline">添加规则</button><div id="rules-result"></div><div class="ops-toolbar"><button id="cloud-network-apply" class="btn btn-danger">应用网络限制</button><button class="btn btn-outline" onclick="queueFleetOperation(\'network_remove\')">解除网络限制</button></div></section>' + fleetJobsHTML();
         } else if (page === 'power') {
@@ -64,6 +71,7 @@ function loadCloudPage(page) {
     } else if (page === 'distribute') {
         loadCloudFiles();
         $('#cloud-file-input').on('change', uploadCloudFile);
+        $('#cloud-file-select-all').on('change', function() { selectAllCloudFiles($(this).is(':checked')); });
     } else if (page === 'network') {
         $.getJSON('/api/network/rules', function(rules) {
             if (currentPage !== 'network' || !isCloudAllRooms()) return;
@@ -87,6 +95,7 @@ function loadCloudPage(page) {
         });
     }
     updateCloudPage();
+    if (typeof loadSnapshotPanel === "function") loadSnapshotPanel();
     refreshRoomsData();
     refreshFleetJobs();
     return true;
@@ -134,7 +143,43 @@ function updateCloudPage() {
 function loadCloudFiles() {
     $.getJSON('/api/distribution/files', function(files) {
         var selected = new Set($('.fleet-file:checked').map(function() { return this.value; }).get());
-        $('#fleet-files').html(files.map(function(file) { return '<label class="ops-toolbar"><input class="fleet-file" type="checkbox" value="' + escapeHtml(file.name) + '" ' + (selected.has(file.name) ? 'checked' : '') + '> ' + escapeHtml(file.name) + ' · ' + formatBytes(file.size) + '</label>'; }).join('') || '<p class="settings-desc">尚未上传文件</p>');
+        $('#fleet-files').html((files || []).map(function(file) {
+            return '<tr><td style="text-align:center;"><input class="fleet-file" type="checkbox" value="' + escapeHtml(file.name) + '" ' + (selected.has(file.name) ? 'checked' : '') + '></td><td><strong>' + escapeHtml(file.name) + '</strong></td><td>' + formatBytes(file.size) + '</td><td>' + escapeHtml(file.mod_time || '') + '</td></tr>';
+        }).join('') || '<tr><td colspan="4" class="empty-state">尚未上传文件</td></tr>');
+        $('#cloud-file-select-all').prop('checked', false);
+    }).fail(function() {
+        $('#fleet-files').html('<tr><td colspan="4" class="empty-state">无法加载云端文件库</td></tr>');
+    });
+}
+
+function selectAllCloudFiles(checked) {
+    $('.fleet-file').prop('checked', checked);
+    $('#cloud-file-select-all').prop('checked', checked);
+}
+
+function selectedCloudFileNames() {
+    return $('.fleet-file:checked').map(function() { return this.value; }).get();
+}
+
+function deleteSelectedCloudFiles() {
+    var names = selectedCloudFileNames();
+    if (!names.length) { showToast('请先选中要删除的文件', 'error'); return; }
+    if (!confirm('确定从云端文件库删除这 ' + names.length + ' 个文件吗？已分发到机房的副本不受影响。')) return;
+    $.ajax({url:'/api/distribution/delete',method:'POST',contentType:'application/json',data:JSON.stringify({filenames:names})}).done(function() {
+        showToast('已删除', 'success');
+        loadCloudFiles();
+    }).fail(function(request) {
+        showToast((request.responseJSON && request.responseJSON.error) || '删除失败', 'error');
+    });
+}
+
+function clearCloudFiles() {
+    if (!confirm('确定清空云端文件库的全部文件吗？该操作不可逆。')) return;
+    $.ajax({url:'/api/distribution/clear',method:'POST'}).done(function() {
+        showToast('云端文件库已清空', 'success');
+        loadCloudFiles();
+    }).fail(function(request) {
+        showToast((request.responseJSON && request.responseJSON.error) || '清空失败', 'error');
     });
 }
 
@@ -145,10 +190,31 @@ function uploadCloudFile() {
     form.append('file', file);
     $('#cloud-file-input').prop('disabled', true);
     $('#cloud-upload-status').text('正在上传 ' + file.name);
-    $.ajax({url:'/api/distribution/upload',method:'POST',data:form,processData:false,contentType:false}).done(function() {
+    $('#cloud-upload-progress').show();
+    $('#cloud-upload-fill').css('width', '0%');
+    $('#cloud-upload-text').text('0%');
+    $.ajax({
+        url: '/api/distribution/upload', method: 'POST', data: form, processData: false, contentType: false,
+        xhr: function() {
+            var xhr = new window.XMLHttpRequest();
+            xhr.upload.addEventListener('progress', function(event) {
+                if (event.lengthComputable) {
+                    var pct = Math.round(event.loaded / event.total * 100);
+                    $('#cloud-upload-fill').css('width', pct + '%');
+                    $('#cloud-upload-text').text(pct + '%');
+                }
+            }, false);
+            return xhr;
+        }
+    }).done(function() {
         $('#cloud-upload-status').text('上传成功');
         loadCloudFiles();
-    }).fail(function() { $('#cloud-upload-status').text('上传失败，请重试'); }).always(function() { $('#cloud-file-input').prop('disabled', false).val(''); });
+    }).fail(function() {
+        $('#cloud-upload-status').text('上传失败，请重试');
+    }).always(function() {
+        $('#cloud-file-input').prop('disabled', false).val('');
+        setTimeout(function() { $('#cloud-upload-progress').hide(); }, 800);
+    });
 }
 
 var broadcastRoomSelection = new Set();

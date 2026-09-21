@@ -36,6 +36,7 @@ type PowerHandler struct {
 	scheduleRepo *data.PowerScheduleRepo
 	hub          *biz.Hub
 	settings     *ServerSettings
+	snapshots    *SnapshotManager
 }
 
 func NewPowerHandler(deviceRepo *data.DeviceRepo, dispatcher *biz.CommandDispatcher,
@@ -48,6 +49,8 @@ func NewPowerHandler(deviceRepo *data.DeviceRepo, dispatcher *biz.CommandDispatc
 		settings:     settings,
 	}
 }
+
+func (h *PowerHandler) SetSnapshotManager(snapshots *SnapshotManager) { h.snapshots = snapshots }
 
 type wolRequest struct {
 	TargetType string `json:"target_type"` // "all" | "list"
@@ -98,6 +101,9 @@ func (h *PowerHandler) Wake(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[power] WoL: %d/%d magic packets sent (by %s)", sent, len(results), getClientIP(r))
+	if req.TargetType == "all" && h.snapshots != nil {
+		h.snapshots.RecordLocal("wol", "批量唤醒", SnapshotPayload{})
+	}
 	h.hub.BroadcastAdminEvent("power_wol", map[string]interface{}{
 		"sent":  sent,
 		"total": len(results),
@@ -244,6 +250,9 @@ func (h *PowerHandler) createSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[power] scheduled %s at %s (%s) by %s", s.Action, s.RunAt, s.TargetType, s.CreatedBy)
+	if req.TargetType == "all" && h.snapshots != nil {
+		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note})
+	}
 	h.hub.BroadcastAdminEvent("power_schedule_created", map[string]interface{}{"id": s.ID})
 	writeJSON(w, http.StatusOK, s)
 }

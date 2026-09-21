@@ -106,6 +106,9 @@ func (federation *Federation) PublishBroadcast(writer http.ResponseWriter, reque
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	if federation.snapshots != nil && (input.Action == "start" || input.Action == "stop") {
+		federation.snapshots.RecordCloud("broadcast", "广播 "+input.Action+" · "+input.Mode, SnapshotPayload{Rooms: input.RoomIDs, BroadcastJSON: body, BroadcastMode: input.Mode})
+	}
 	writeJSON(writer, 202, map[string]any{"job_ids": jobs, "revision": snapshot.Revision})
 }
 

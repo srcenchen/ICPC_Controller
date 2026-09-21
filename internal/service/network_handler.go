@@ -17,11 +17,14 @@ type NetworkHandler struct {
 	hub        *biz.Hub
 	repo       *data.CommandRepo
 	dispatcher *biz.CommandDispatcher
+	snapshots  *SnapshotManager
 }
 
 func NewNetworkHandler(settings *ServerSettings, hub *biz.Hub, repo *data.CommandRepo, dispatcher *biz.CommandDispatcher) *NetworkHandler {
 	return &NetworkHandler{settings: settings, hub: hub, repo: repo, dispatcher: dispatcher}
 }
+
+func (h *NetworkHandler) SetSnapshotManager(snapshots *SnapshotManager) { h.snapshots = snapshots }
 
 // GetRules returns current network rules (GET /api/network/rules).
 func (h *NetworkHandler) GetRules(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +113,9 @@ func (h *NetworkHandler) dispatch(targetType string, targetID *int, command, exe
 	}
 	if err := h.repo.Create(cmd); err != nil {
 		return cmd
+	}
+	if targetType == "broadcast" && h.snapshots != nil {
+		h.snapshots.RecordLocal("command", "网络规则变更", SnapshotPayload{Command: command})
 	}
 	go func() {
 		if targetType == "broadcast" {

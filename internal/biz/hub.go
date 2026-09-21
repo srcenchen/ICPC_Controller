@@ -46,15 +46,30 @@ type AdminConn struct {
 
 // Hub maintains the set of active client and admin connections.
 type Hub struct {
-	mu         sync.RWMutex
-	clients    map[int]*ClientConn
-	admins     map[*AdminConn]bool
-	register   chan *ClientConn
-	unregister chan *ClientConn
-	adminReg   chan *AdminConn
-	adminUnreg chan *AdminConn
-	deviceRepo *data.DeviceRepo
-	eventRepo  *data.DeviceEventRepo
+	mu          sync.RWMutex
+	clients     map[int]*ClientConn
+	admins      map[*AdminConn]bool
+	register    chan *ClientConn
+	unregister  chan *ClientConn
+	adminReg    chan *AdminConn
+	adminUnreg  chan *AdminConn
+	deviceRepo  *data.DeviceRepo
+	eventRepo   *data.DeviceEventRepo
+	connectHook atomic.Value // func(int)
+}
+
+// SetConnectHook registers a callback invoked (asynchronously) after a client
+// connection is fully registered. Used to replay operation snapshots to devices
+// that were offline when the operation was issued.
+func (h *Hub) SetConnectHook(fn func(int)) {
+	h.connectHook.Store(fn)
+}
+
+func (h *Hub) runConnectHook(assignedID int) {
+	fn, _ := h.connectHook.Load().(func(int))
+	if fn != nil {
+		go fn(assignedID)
+	}
 }
 
 // SetEventRepo enables online/offline history recording.
@@ -112,6 +127,7 @@ func (h *Hub) Run() {
 			h.broadcastAdminEvent("device_connected", map[string]interface{}{
 				"assigned_id": client.AssignedID,
 			})
+			h.runConnectHook(client.AssignedID)
 
 		case client := <-h.unregister:
 			h.mu.Lock()

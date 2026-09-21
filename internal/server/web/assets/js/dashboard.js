@@ -130,10 +130,12 @@ function renderDashboard(stats, dist, checkin) {
                 '</thead>' +
                 '<tbody>' + renderCommandRows(stats.recent_commands) + '</tbody>' +
             '</table>' +
-        '</div>';
+        '</div>' +
+        snapshotPanelHTML();
 
     $("#content").html(html);
     updateStatusBar();
+    if (typeof loadSnapshotPanel === "function") loadSnapshotPanel();
 }
 
 function renderCommandRows(commands) {

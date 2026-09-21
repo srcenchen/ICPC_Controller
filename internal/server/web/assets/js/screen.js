@@ -14,12 +14,26 @@ function stopAllIOSLoops() {
     activeIOSLoops = [];
 }
 
+// Cloud room mirror streams screen frames through the relay, one JPEG per
+// request, so it must use the polling loop instead of a continuous MJPEG img.
+function useScreenFrameLoop() {
+    return isIOS() || (typeof isCloudRoomMirror === "function" && isCloudRoomMirror());
+}
+
+function screenFrameURL(deviceId, hd) {
+    var query = "?hd=" + (hd ? "1" : "0") + "&single=1";
+    if (typeof isCloudRoomMirror === "function" && isCloudRoomMirror()) {
+        return "/api/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/proxy/devices/" + deviceId + "/screen" + query;
+    }
+    return "/api/devices/" + deviceId + "/screen" + query;
+}
+
 function startImageLoop(imgElement, deviceId, hd) {
     var active = true;
     
     function loadNext() {
         if (!active) return;
-        var url = '/api/devices/' + deviceId + '/screen?hd=' + (hd ? '1' : '0') + '&single=1&_t=' + Date.now();
+        var url = screenFrameURL(deviceId, hd) + "&_t=" + Date.now();
         
         var tempImg = new Image();
         tempImg.onload = function() {
@@ -96,7 +110,8 @@ function renderScreenPage(settings) {
         var assignedId = $(this).data("id");
         $.getJSON("/api/devices/" + assignedId, function(d) {
             var ip = getDeviceIP(d.local_ip);
-            if (!ip || !d.connected) {
+            var mirrored = typeof isCloudRoomMirror === "function" && isCloudRoomMirror();
+            if ((!ip || !d.connected) && !(mirrored && d.connected)) {
                 alert("该设备已离线，无法开启高分屏幕监控");
                 return;
             }
@@ -149,14 +164,15 @@ function renderScreenDevices(devices) {
         var checkinLabel = d.student_name ? escapeHtml(d.student_name) + ' (' + escapeHtml(d.student_num) + ')' : '未签到';
         var statusBadge = '<span class="badge badge-' + (d.connected ? 'online' : 'offline') + '">' + (d.connected ? '在线' : '离线') + '</span>';
 
+        var mirrored = typeof isCloudRoomMirror === "function" && isCloudRoomMirror();
         var bodyHtml = '';
         if (!d.connected) {
             bodyHtml = '<div class="screen-placeholder">设备离线</div>';
-        } else if (!ip) {
+        } else if (!ip && !mirrored) {
             bodyHtml = '<div class="screen-placeholder">未知IP</div>';
         } else {
             var proxyUrl = '/api/devices/' + d.assigned_id + '/screen';
-            if (isIOS()) {
+            if (useScreenFrameLoop()) {
                 bodyHtml = '<img class="ios-screen-img" data-id="' + d.assigned_id + '" data-hd="0" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />' +
                            '<div class="screen-placeholder screen-err" style="display:none;">无法连接屏幕流</div>';
             } else {
@@ -199,7 +215,7 @@ function renderScreenDevices(devices) {
         existingCards[id].remove();
     }
 
-    if (isIOS()) {
+    if (useScreenFrameLoop()) {
         stopAllIOSLoops();
         $(".ios-screen-img").each(function() {
             var img = this;
@@ -242,7 +258,7 @@ function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
                 '<h2>选手 #' + assignedId + ' (' + escapeHtml(hostname) + ') 屏幕监控 <small style="font-weight:normal;color:var(--text-secondary);font-size:14px;margin-left:10px;">' + escapeHtml(checkinLabel) + '</small></h2>' +
                 '<div class="modal-large-body">';
                 
-    if (isIOS()) {
+    if (useScreenFrameLoop()) {
         html += '<img id="ios-large-img" data-id="' + assignedId + '" src="" onerror="this.style.display=\'none\'; $(this).siblings(\'.screen-err\').show();" />';
     } else {
         var streamUrl = '/api/devices/' + assignedId + '/screen?hd=1';
@@ -256,7 +272,7 @@ function showLargeScreen(assignedId, hostname, ip, checkinLabel) {
         
     $("body").append(html);
     
-    if (isIOS()) {
+    if (useScreenFrameLoop()) {
         var imgEl = document.getElementById("ios-large-img");
         largeIOSLoop = startImageLoop(imgEl, assignedId, true);
     }

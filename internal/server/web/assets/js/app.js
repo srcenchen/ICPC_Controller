@@ -173,6 +173,10 @@ function connectAdminWS() {
 
 var _deviceEventTimer = null;
 function handleAdminEvent(msg) {
+    if (msg.event === "snapshot_updated") {
+        if (typeof loadSnapshotPanel === "function" && $("#snapshot-body").length) loadSnapshotPanel();
+        return;
+    }
     if (typeof isCloudAllRooms === 'function' && isCloudAllRooms()) return;
     switch (msg.event) {
         case "device_connected":

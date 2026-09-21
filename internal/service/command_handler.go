@@ -16,12 +16,15 @@ type CommandHandler struct {
 	dispatcher *biz.CommandDispatcher
 	hub        *biz.Hub
 	settings   *ServerSettings
+	snapshots  *SnapshotManager
 }
 
 // NewCommandHandler creates a new CommandHandler.
 func NewCommandHandler(repo *data.CommandRepo, dispatcher *biz.CommandDispatcher, hub *biz.Hub, settings *ServerSettings) *CommandHandler {
 	return &CommandHandler{repo: repo, dispatcher: dispatcher, hub: hub, settings: settings}
 }
+
+func (h *CommandHandler) SetSnapshotManager(snapshots *SnapshotManager) { h.snapshots = snapshots }
 
 // ExecuteRequest is the JSON body for POST /api/commands.
 type ExecuteRequest struct {
@@ -69,6 +72,9 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	if err := h.repo.Create(cmd); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if cmd.TargetType == "broadcast" && h.snapshots != nil {
+		h.snapshots.RecordLocal("command", "执行命令："+snippet(cmd.Command, 80), SnapshotPayload{Command: cmd.Command})
 	}
 
 	// Dispatch asynchronously.

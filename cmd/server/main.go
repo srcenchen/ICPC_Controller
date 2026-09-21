@@ -135,6 +135,19 @@ func main() {
 	powerHandler := service.NewPowerHandler(deviceRepo, dispatcher, scheduleRepo, hub, settings)
 	installHandler := service.NewInstallHandler("data/uploads", *tcpPort, hub)
 
+	// Offline operation snapshots (queues) replayed to late devices/rooms.
+	snapshotRepo := data.NewSnapshotRepo(db)
+	snapshotMgr := service.NewSnapshotManager(snapshotRepo, settings, deviceRepo, hub, dispatcher)
+	snapshotMgr.SetDistribution(service.DistributionMgr)
+	snapshotMgr.SetPower(powerHandler)
+	commandHandler.SetSnapshotManager(snapshotMgr)
+	networkHandler.SetSnapshotManager(snapshotMgr)
+	powerHandler.SetSnapshotManager(snapshotMgr)
+	distHandler.SetSnapshotManager(snapshotMgr)
+	hub.SetConnectHook(snapshotMgr.ReplayToDevice)
+	federation.SetSnapshotManager(snapshotMgr)
+	snapshotMgr.SetFederation(federation)
+
 	// TCP handler for client connections.
 	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo, eventRepo)
 
@@ -172,6 +185,7 @@ func main() {
 		ScreenProxyH:  screenProxyH,
 		PowerH:        powerHandler,
 		InstallH:      installHandler,
+		Snapshots:     snapshotMgr,
 	}
 
 	srv := server.New(cfg)

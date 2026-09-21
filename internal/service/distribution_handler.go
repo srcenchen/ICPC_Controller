@@ -11,12 +11,15 @@ import (
 )
 
 type DistributionHandler struct {
-	mgr *DistributionManager
+	mgr       *DistributionManager
+	snapshots *SnapshotManager
 }
 
 func NewDistributionHandler(mgr *DistributionManager) *DistributionHandler {
 	return &DistributionHandler{mgr: mgr}
 }
+
+func (h *DistributionHandler) SetSnapshotManager(snapshots *SnapshotManager) { h.snapshots = snapshots }
 
 // ListFiles returns files available on the server (GET /api/distribution/files)
 func (h *DistributionHandler) ListFiles(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +136,13 @@ func (h *DistributionHandler) StartTask(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	if len(body.TargetIDs) == 0 && h.snapshots != nil {
+		files := make([]RelayFile, 0, len(body.Files))
+		for _, name := range body.Files {
+			files = append(files, RelayFile{Name: name})
+		}
+		h.snapshots.RecordLocal("distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: files, SaveDir: body.SaveDir, PostCmd: body.PostCmd})
 	}
 
 	writeJSON(w, http.StatusOK, task)

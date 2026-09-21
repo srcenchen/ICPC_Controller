@@ -82,6 +82,11 @@ type Federation struct {
 	broadcast     *BroadcastHandler
 	broadcastDir  string
 	backup        *BackupHandler
+	snapshots     *SnapshotManager
+}
+
+func (federation *Federation) SetSnapshotManager(snapshots *SnapshotManager) {
+	federation.snapshots = snapshots
 }
 
 func NewFederation(db *sql.DB, settings *ServerSettings, devices *data.DeviceRepo, distribution *DistributionManager, hub *biz.Hub) *Federation {
@@ -112,10 +117,6 @@ func (federation *Federation) Start(ctx context.Context, local http.Handler) {
 
 func (federation *Federation) NodeAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, httpRequest *http.Request) {
-		if federation.settings.GetDeployment().Mode == "cloud" && strings.HasPrefix(httpRequest.URL.Path, "/api/devices/") && strings.HasSuffix(httpRequest.URL.Path, "/screen") {
-			writeJSON(writer, 403, map[string]string{"error": "屏幕监控仅在机房本地提供"})
-			return
-		}
 		if httpRequest.URL.Path != "/api/cluster/connect" && !strings.HasPrefix(httpRequest.URL.Path, "/api/cluster/files/") && !strings.HasPrefix(httpRequest.URL.Path, "/api/cluster/broadcast-assets/") {
 			next.ServeHTTP(writer, httpRequest)
 			return
@@ -185,6 +186,9 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 		federation.mu.Unlock()
 	}()
 	federation.storeSnapshot(room)
+	if federation.snapshots != nil {
+		go federation.snapshots.ReplayToRoom(room.ID)
+	}
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		var message FederationMessage
@@ -300,16 +304,24 @@ func allowedRelayRequest(method, path string) bool {
 		return false
 	}
 	path = parsed.Path
-	if strings.Contains(path, "screen") || strings.HasPrefix(path, "/ws/") {
+	if strings.HasPrefix(path, "/ws/") {
 		return false
 	}
 	if method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
 		return false
 	}
+	// Screen frames may be relayed as single JPEG snapshots (the cloud UI polls
+	// them); continuous MJPEG streams are never relayed.
+	if strings.HasSuffix(path, "/screen") {
+		if !strings.HasPrefix(path, "/api/devices/") || method != "GET" {
+			return false
+		}
+		return parsed.Query().Get("single") == "1"
+	}
 	if path == "/api/broadcast/sync" {
 		return method == "POST"
 	}
-	for _, prefix := range []string{"/api/devices", "/api/commands", "/api/checkin", "/api/network", "/api/power", "/api/distribution"} {
+	for _, prefix := range []string{"/api/devices", "/api/commands", "/api/checkin", "/api/network", "/api/power", "/api/distribution", "/api/snapshots"} {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			if strings.HasSuffix(path, "/upload") || strings.HasSuffix(path, "/delete") || strings.HasSuffix(path, "/clear") {
 				return false
@@ -809,6 +821,23 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 			manifest = append(manifest, RelayFile{Name: name, SHA256: digest, Size: info.Size()})
 		}
 	}
+	// When a cloud operation snapshot is active, every broadcast operation is
+	// recorded and applied to every room for all of its devices, so late rooms
+	// and late devices catch up without operator intervention.
+	snapshotActive := federation.snapshots != nil && federation.snapshots.Active() != nil
+	if snapshotActive {
+		rooms, err := federation.allRoomIDs()
+		if err != nil {
+			writeJSON(writer, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(rooms) == 0 {
+			writeJSON(writer, 400, map[string]string{"error": "暂无机房可执行快照操作"})
+			return
+		}
+		request.RoomIDs = rooms
+		request.Targets = nil
+	}
 	tx, err := federation.db.BeginTx(httpRequest.Context(), nil)
 	if err != nil {
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
@@ -828,35 +857,54 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 			return
 		}
 		targets, present := request.Targets[room]
-		if !present || len(targets) == 0 {
-			writeJSON(writer, 400, map[string]string{"error": "每个机房必须显式选择设备，防止误广播"})
-			return
-		}
-		for _, target := range targets {
-			if target <= 0 {
-				writeJSON(writer, 400, map[string]string{"error": "无效的设备号"})
+		if !snapshotActive {
+			if !present || len(targets) == 0 {
+				writeJSON(writer, 400, map[string]string{"error": "每个机房必须显式选择设备，防止误广播"})
 				return
+			}
+			for _, target := range targets {
+				if target <= 0 {
+					writeJSON(writer, 400, map[string]string{"error": "无效的设备号"})
+					return
+				}
 			}
 		}
 		messages := make([]FederationMessage, 0)
 		if request.Operation == "command" {
-			selected := make(map[int]bool)
-			for _, deviceID := range targets {
-				if deviceID <= 0 || selected[deviceID] {
-					continue
-				}
-				selected[deviceID] = true
-				body, _ := json.Marshal(ExecuteRequest{TargetType: "single", TargetID: &deviceID, Command: request.Command})
+			if snapshotActive {
+				body, _ := json.Marshal(ExecuteRequest{TargetType: "broadcast", Command: request.Command})
 				messages = append(messages, FederationMessage{Path: "/api/commands", Body: body})
+			} else {
+				selected := make(map[int]bool)
+				for _, deviceID := range targets {
+					if deviceID <= 0 || selected[deviceID] {
+						continue
+					}
+					selected[deviceID] = true
+					body, _ := json.Marshal(ExecuteRequest{TargetType: "single", TargetID: &deviceID, Command: request.Command})
+					messages = append(messages, FederationMessage{Path: "/api/commands", Body: body})
+				}
 			}
 		} else if request.Operation == "distribute" {
-			body, _ := json.Marshal(map[string]interface{}{"manifest": manifest, "save_dir": request.SaveDir, "post_cmd": request.PostCmd, "target_ids": targets})
+			targetIDs := interface{}(targets)
+			if snapshotActive {
+				targetIDs = []int(nil)
+			}
+			body, _ := json.Marshal(map[string]interface{}{"manifest": manifest, "save_dir": request.SaveDir, "post_cmd": request.PostCmd, "target_ids": targetIDs})
 			messages = append(messages, FederationMessage{Path: "/api/distribution/start", Body: body})
 		} else if request.Operation == "wol" {
-			body, _ := json.Marshal(wolRequest{TargetType: "list", DeviceIDs: targets})
+			wolBody := wolRequest{TargetType: "list", DeviceIDs: targets}
+			if snapshotActive {
+				wolBody = wolRequest{TargetType: "all"}
+			}
+			body, _ := json.Marshal(wolBody)
 			messages = append(messages, FederationMessage{Path: "/api/power/wol", Body: body})
 		} else {
-			body, _ := json.Marshal(scheduleRequest{TargetType: "list", DeviceIDs: targets, Action: request.Action, RunAt: request.RunAt, Note: request.Note})
+			scheduleBody := scheduleRequest{TargetType: "list", DeviceIDs: targets, Action: request.Action, RunAt: request.RunAt, Note: request.Note}
+			if snapshotActive {
+				scheduleBody = scheduleRequest{TargetType: "all", Action: request.Action, RunAt: request.RunAt, Note: request.Note}
+			}
+			body, _ := json.Marshal(scheduleBody)
 			messages = append(messages, FederationMessage{Path: "/api/power/schedules", Body: body})
 		}
 		for _, message := range messages {
@@ -872,6 +920,30 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 	if err := tx.Commit(); err != nil {
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
+	}
+	if federation.snapshots != nil {
+		payload := SnapshotPayload{Rooms: request.RoomIDs}
+		summary := ""
+		switch request.Operation {
+		case "command":
+			payload.Command = request.Command
+			summary = "执行命令：" + snippet(request.Command, 80)
+		case "distribute":
+			payload.Files = manifest
+			payload.SaveDir = request.SaveDir
+			payload.PostCmd = request.PostCmd
+			names := make([]string, 0, len(manifest))
+			for _, file := range manifest {
+				names = append(names, file.Name)
+			}
+			summary = "分发文件：" + snippet(strings.Join(names, ", "), 80)
+		case "wol":
+			summary = "批量唤醒"
+		case "schedule":
+			payload.Action, payload.RunAt, payload.Note = request.Action, request.RunAt, request.Note
+			summary = "电源计划：" + request.Action + " @ " + request.RunAt
+		}
+		federation.snapshots.RecordCloud(request.Operation, summary, payload)
 	}
 	writeJSON(writer, 202, map[string]interface{}{"job_ids": ids, "message": "已入队；离线机房恢复后投递，执行结果请查看机房命令记录"})
 }
@@ -909,6 +981,72 @@ func (federation *Federation) deliverJobs() {
 			_ = connection.send(request)
 		}
 	}
+}
+
+// allRoomIDs returns every known room id from the stored cluster snapshots.
+func (federation *Federation) allRoomIDs() ([]string, error) {
+	rows, err := federation.db.Query(`SELECT id FROM cluster_rooms ORDER BY name,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rooms := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		rooms = append(rooms, id)
+	}
+	return rooms, rows.Err()
+}
+
+// onlineRooms returns the IDs of rooms whose relay is currently connected.
+func (federation *Federation) onlineRooms() []string {
+	federation.mu.Lock()
+	defer federation.mu.Unlock()
+	rooms := make([]string, 0, len(federation.connections))
+	for id := range federation.connections {
+		rooms = append(rooms, id)
+	}
+	return rooms
+}
+
+// enqueueSnapshotOp converts a recorded cloud snapshot operation into a relay
+// job for the given room. The room re-applies it to all of its devices and
+// records it in its own local snapshot.
+func (federation *Federation) enqueueSnapshotOp(roomID string, op data.SnapshotOp) error {
+	var payload SnapshotPayload
+	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
+		return err
+	}
+	var message FederationMessage
+	switch payload.Kind {
+	case "command":
+		body, _ := json.Marshal(ExecuteRequest{TargetType: "broadcast", Command: payload.Command})
+		message = FederationMessage{Path: "/api/commands", Body: body}
+	case "distribute":
+		body, _ := json.Marshal(map[string]interface{}{"manifest": payload.Files, "save_dir": payload.SaveDir, "post_cmd": payload.PostCmd})
+		message = FederationMessage{Path: "/api/distribution/start", Body: body}
+	case "wol":
+		body, _ := json.Marshal(wolRequest{TargetType: "all"})
+		message = FederationMessage{Path: "/api/power/wol", Body: body}
+	case "schedule":
+		body, _ := json.Marshal(scheduleRequest{TargetType: "all", Action: payload.Action, RunAt: payload.RunAt, Note: payload.Note})
+		message = FederationMessage{Path: "/api/power/schedules", Body: body}
+	case "broadcast":
+		if len(payload.BroadcastJSON) == 0 {
+			return fmt.Errorf("广播快照内容为空")
+		}
+		message = FederationMessage{Path: "/api/broadcast/sync", Body: payload.BroadcastJSON}
+	default:
+		return fmt.Errorf("未知快照类型 %q", payload.Kind)
+	}
+	message.Type, message.Method, message.ID = "request", "POST", uuid.NewString()
+	raw, _ := json.Marshal(message)
+	_, err := federation.db.Exec(`INSERT INTO cluster_jobs(id,room_id,request,created_at) VALUES(?,?,?,?)`,
+		message.ID, roomID, string(raw), time.Now().UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 func (federation *Federation) Jobs(writer http.ResponseWriter, httpRequest *http.Request) {

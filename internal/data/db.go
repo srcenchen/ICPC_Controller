@@ -161,6 +161,33 @@ func migrate(db *sql.DB) error {
 			fired_at    TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_power_schedules_status ON power_schedules(status, run_at)`,
+		// Offline operation snapshots (queues) applied to late-joining devices/rooms.
+		`CREATE TABLE IF NOT EXISTS operation_snapshots (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			name       TEXT    NOT NULL,
+			scope      TEXT    NOT NULL DEFAULT 'local',
+			scope_id   TEXT    NOT NULL DEFAULT '',
+			active     INTEGER NOT NULL DEFAULT 1,
+			created_at TEXT    NOT NULL,
+			ended_at   TEXT    NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_operation_snapshots_scope ON operation_snapshots(scope, active)`,
+		`CREATE TABLE IF NOT EXISTS snapshot_ops (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			snapshot_id INTEGER NOT NULL,
+			kind        TEXT    NOT NULL,
+			payload     TEXT    NOT NULL DEFAULT '{}',
+			summary     TEXT    NOT NULL DEFAULT '',
+			created_at  TEXT    NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshot_ops_snapshot ON snapshot_ops(snapshot_id)`,
+		`CREATE TABLE IF NOT EXISTS snapshot_deliveries (
+			op_id        INTEGER NOT NULL,
+			target_kind  TEXT    NOT NULL,
+			target_id    TEXT    NOT NULL,
+			delivered_at TEXT    NOT NULL,
+			PRIMARY KEY(op_id, target_kind, target_id)
+		)`,
 	}
 
 	for _, stmt := range stmts {

@@ -51,6 +51,7 @@ type Config struct {
 	ScreenProxyH  *service.ScreenProxyHandler
 	PowerH        *service.PowerHandler
 	InstallH      *service.InstallHandler
+	Snapshots     *service.SnapshotManager
 }
 
 // New creates a new Server.
@@ -169,6 +170,15 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("POST /api/client/update", cfg.InstallH.TriggerUpdate)
 	}
 
+	if cfg.Snapshots != nil {
+		mux.HandleFunc("GET /api/snapshots", cfg.Snapshots.List)
+		mux.HandleFunc("POST /api/snapshots", cfg.Snapshots.StartSnapshot)
+		mux.HandleFunc("POST /api/snapshots/{id}/end", cfg.Snapshots.EndSnapshot)
+		mux.HandleFunc("DELETE /api/snapshots/{id}", cfg.Snapshots.DeleteSnapshot)
+		mux.HandleFunc("GET /api/snapshots/{id}/ops", cfg.Snapshots.Ops)
+		mux.HandleFunc("DELETE /api/snapshots/{id}/ops/{opID}", cfg.Snapshots.DeleteOp)
+	}
+
 	mux.HandleFunc("GET /ws/broadcast", service.BroadcastWS.Serve)
 	mux.HandleFunc("GET /ws/admin", cfg.AdminWSH.Serve)
 	mux.HandleFunc("GET /ws/terminal/{id}", cfg.TerminalWSH.Serve)
@@ -186,6 +196,20 @@ func New(cfg Config) *Server {
 
 	// Broadcast display pages — serve .html without extension for clean URLs.
 	broadcastFS := noCacheFS
+	// Cloud room mirror mode: the same SPA is served for /room/<id> and the
+	// frontend reads the room id from the path.
+	indexHTML, indexErr := fs.ReadFile(webSubFS, "index.html")
+	roomPage := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if indexErr != nil {
+			http.Error(w, "index unavailable", 500)
+			return
+		}
+		_, _ = w.Write(indexHTML)
+	}
+	mux.HandleFunc("GET /room/{room}", roomPage)
+	mux.HandleFunc("GET /room/{room}/", roomPage)
 	mux.HandleFunc("GET /broadcast/before", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/broadcast/before.html"
 		broadcastFS.ServeHTTP(w, r)
@@ -203,6 +227,9 @@ func New(cfg Config) *Server {
 
 	var handler http.Handler = mux
 	ctx, stopBackground := context.WithCancel(context.Background())
+	if cfg.Snapshots != nil {
+		cfg.Snapshots.Start(ctx)
+	}
 	if cfg.Federation != nil {
 		cfg.Federation.ConfigureBroadcast(cfg.BroadcastH, cfg.BackupH)
 		cfg.Federation.Start(ctx, mux)

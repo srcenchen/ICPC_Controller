@@ -9,12 +9,33 @@ var fleetRoomFilter = "";
 var pendingPageRequests = new Set();
 var roomsRequest = null;
 
+// Cloud room mirror mode: /room/<id> makes the whole page behave as that room.
+var roomPathID = (function() {
+    var match = location.pathname.match(/^\/room\/([^/]+)\/?$/);
+    return match ? decodeURIComponent(match[1]) : "";
+})();
+
+function isCloudRoomMirror() {
+    return typeof deploymentConfig !== "undefined" && deploymentConfig.mode === "cloud" && !!selectedRoom;
+}
+
+function syncRoomURL(page) {
+    if (deploymentConfig.mode !== "cloud") return;
+    var target = selectedRoom ? "/room/" + encodeURIComponent(selectedRoom) : "/";
+    var hash = page || currentPage || "";
+    var url = target + (hash ? "#" + hash : "");
+    if (location.pathname + location.hash !== url) {
+        try { history.replaceState(null, "", url); } catch (e) {}
+    }
+}
+
+
 $.ajaxPrefilter(function(options, original, request) {
     if (options.type === 'GET' && options.url !== '/api/cluster/status') {
         pendingPageRequests.add(request);
         request.always(function() { pendingPageRequests.delete(request); });
     }
-    if (selectedRoom && (/^\/api\/(devices|commands|stats|checkin|network|power|presets|distribution)(\/|\?|$)/.test(options.url) || /^\/api\/settings\/(presets|checkin)(\?|$)/.test(options.url))) {
+    if (selectedRoom && (/^\/api\/(devices|commands|stats|checkin|network|power|presets|distribution|snapshots)(\/|\?|$)/.test(options.url) || /^\/api\/settings\/(presets|checkin)(\?|$)/.test(options.url))) {
         options.url = "/api/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/proxy/" + options.url.slice(5);
     }
 });
@@ -36,10 +57,12 @@ $(function() {
     $("#room-scope").on("change", function() {
         if (currentPage === 'broadcast' && !bcCanLeave()) { $(this).val(selectedRoom); return; }
         selectedRoom = this.value;
+        roomPathID = this.value;
         selectedTargets = [];
         allDevices = [];
         if (typeof closeTerminal === "function") closeTerminal();
         if (currentPage === 'broadcast') broadcastRoomSelection = new Set(selectedRoom ? [selectedRoom] : []);
+        syncRoomURL(currentPage);
         navigateTo(currentPage);
     });
     $(document).ajaxError(function(event, xhr, options) {
@@ -58,8 +81,8 @@ $(function() {
 
 function guardCloudPage(page) {
     if (deploymentConfig.mode !== "cloud") return page;
-    if (page === "screen") {
-        showToast("屏幕监控仅在机房局域网内提供；广播内容可以在云端编辑与分发", "info");
+    if (page === "screen" && !selectedRoom) {
+        showToast("请先进入一个机房再查看屏幕；云端总览不汇聚屏幕流", "info");
         return "devices";
     }
     return page;
@@ -72,7 +95,12 @@ function refreshDeployment() {
         var labels = {standalone: "单机模式", relay: "并机 · " + (deploymentConfig.room_name || "中转"), cloud: "云端模式"};
         $("#deployment-badge").text(labels[deploymentConfig.mode]);
         $("#room-scope").prop("hidden", deploymentConfig.mode !== "cloud");
-        if (deploymentConfig.mode !== "cloud") selectedRoom = "";
+        if (deploymentConfig.mode !== "cloud") {
+            selectedRoom = "";
+            roomPathID = "";
+        } else if (roomPathID) {
+            selectedRoom = roomPathID;
+        }
         if (deploymentConfig.mode === "cloud") refreshRoomsData();
         var page = guardCloudPage(currentPage);
         if (page !== currentPage) navigateTo(page);
@@ -193,8 +221,8 @@ function renderFleetDevices() {
     }).join("") || '<tr><td colspan="8" class="empty-state">没有匹配的设备</td></tr>');
 }
 
-function enterRoom(roomID, page) { selectedRoom = roomID; selectedTargets = []; allDevices = []; if (typeof closeTerminal === 'function') closeTerminal(); $("#room-scope").val(roomID); navigateTo(page || "devices"); }
-function openCloudFiles() { selectedRoom = ""; $("#room-scope").val(""); navigateTo("distribute"); }
+function enterRoom(roomID, page) { selectedRoom = roomID; roomPathID = roomID; selectedTargets = []; allDevices = []; if (typeof closeTerminal === 'function') closeTerminal(); $("#room-scope").val(roomID); syncRoomURL(page || "devices"); navigateTo(page || "devices"); }
+function openCloudFiles() { selectedRoom = ""; roomPathID = ""; $("#room-scope").val(""); syncRoomURL("distribute"); navigateTo("distribute"); }
 function cancelFleetJob(id) { $.ajax({url: "/api/cluster/jobs/" + id, method: "DELETE"}).done(refreshRoomsData); }
 
 function queueFleetOperation(operation, extra) {
