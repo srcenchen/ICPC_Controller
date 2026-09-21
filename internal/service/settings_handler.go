@@ -28,9 +28,10 @@ func (h *SettingsHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Update accepts partial settings updates (POST /api/settings).
 func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		HostnamePrefix       *string         `json:"hostname_prefix,omitempty"`
-		ScreenMonitorEnabled *bool           `json:"screen_monitor_enabled,omitempty"`
-		Maintenance          *MaintenanceCfg `json:"maintenance,omitempty"`
+		Deployment           *DeploymentConfig `json:"deployment,omitempty"`
+		HostnamePrefix       *string           `json:"hostname_prefix,omitempty"`
+		ScreenMonitorEnabled *bool             `json:"screen_monitor_enabled,omitempty"`
+		Maintenance          *MaintenanceCfg   `json:"maintenance,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -48,6 +49,19 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.settings.SetHostnamePrefix(prefix)
+	}
+	if req.Deployment != nil {
+		if DistributionMgr != nil && DistributionMgr.IsRunning() {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "请先停止文件分发，再切换部署配置"})
+			return
+		}
+		if err := h.settings.SetDeployment(*req.Deployment); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if req.Deployment.Mode == "cloud" {
+			h.hub.KickAll()
+		}
 	}
 
 	if req.ScreenMonitorEnabled != nil {

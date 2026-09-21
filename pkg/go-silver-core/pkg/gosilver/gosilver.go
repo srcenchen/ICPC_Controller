@@ -2,6 +2,7 @@ package gosilver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	_const "go-silver-core/internal/const"
@@ -9,6 +10,7 @@ import (
 	"go-silver-core/internal/gsp_sdk/model"
 	"go-silver-core/internal/gsp_sdk/server"
 	"go-silver-core/pkg/mempool"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -56,10 +58,6 @@ func (s *Server) Start() error {
 	s.mp = mempool.NewMemPool(_const.ChunkSize)
 	s.session = server.NewGspSession(s.addr, s.mp)
 
-	if err := s.session.Start(); err != nil {
-		return err
-	}
-
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		s.session.Stop()
@@ -70,6 +68,11 @@ func (s *Server) Start() error {
 	if err := s.session.BeSendMain(f); err != nil {
 		f.Close()
 		s.session.Stop()
+		return err
+	}
+	if err := s.session.Start(); err != nil {
+		f.Close()
+		s.file = nil
 		return err
 	}
 
@@ -89,12 +92,14 @@ func (s *Server) Stop() {
 
 // Client 用于管理文件接收客户端 (Receiver) 的下载和 P2P 上报
 type Client struct {
-	senderAddr string
-	saveDir    string
-	peerPort   int
-	mp         *mempool.MemPool
-	session    *server.Session
-	file       *os.File
+	expectedName string
+	expectedHash string
+	senderAddr   string
+	saveDir      string
+	peerPort     int
+	mp           *mempool.MemPool
+	session      *server.Session
+	file         *os.File
 
 	mu         sync.Mutex
 	status     ProgressInfo
@@ -102,6 +107,10 @@ type Client struct {
 	chClosed   bool
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+}
+
+func (c *Client) SetExpectedFile(name, digest string) {
+	c.expectedName, c.expectedHash = name, digest
 }
 
 // NewClient 创建一个新的客户端实例
@@ -161,9 +170,9 @@ func (c *Client) GetStatus() ProgressInfo {
 
 func (c *Client) updateProgress(info ProgressInfo) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	ch := c.progressCh
 	closed := c.chClosed
-	c.mu.Unlock()
 	if closed || ch == nil {
 		return
 	}
@@ -232,6 +241,16 @@ func (c *Client) runDownload(ctx context.Context) {
 	defer c.session.Stop()
 
 	gspC := client.NewGspSdk(c.senderAddr, c.mp)
+	defer gspC.Close()
+	connectionDone := make(chan struct{})
+	defer close(connectionDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			gspC.Close()
+		case <-connectionDone:
+		}
+	}()
 	var status model.GetFileStatusResp
 	for {
 		var err error
@@ -250,16 +269,33 @@ func (c *Client) runDownload(ctx context.Context) {
 		info := c.status
 		c.mu.Unlock()
 		c.updateProgress(info)
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			c.finishCancelled()
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	c.mu.Lock()
 	c.status.TotalChunks = status.ChunkNum
 	c.mu.Unlock()
 
+	if filepath.Base(status.FileName) != status.FileName || status.FileName == "." || status.FileName == "" || status.FileSize < 0 || status.ChunkSize != _const.ChunkSize || status.ChunkNum != (status.FileSize+_const.ChunkSize-1)/_const.ChunkSize {
+		c.finishWithError(fmt.Errorf("invalid file manifest"), "download rejected")
+		return
+	}
+	if c.expectedName != "" && status.FileName != c.expectedName {
+		c.finishWithError(fmt.Errorf("unexpected file name"), "download rejected")
+		return
+	}
 	fileName := status.FileName
 	if c.saveDir != "" {
 		fileName = filepath.Join(c.saveDir, fileName)
+	}
+	finalName := fileName
+	if c.expectedHash != "" {
+		fileName += "." + c.expectedHash + ".part"
 	}
 	metaPath := fileName + ".icpc-chunks"
 
@@ -316,7 +352,12 @@ func (c *Client) runDownload(ctx context.Context) {
 		info := c.status
 		c.mu.Unlock()
 		c.updateProgress(info)
-		time.Sleep(5 * time.Second)
+		select {
+		case <-ctx.Done():
+			c.finishCancelled()
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	// 准备分块索引（跳过已完成，支持断点续传）
@@ -324,8 +365,13 @@ func (c *Client) runDownload(ctx context.Context) {
 	var downloadedCount int64
 	for i := int64(0); i < status.ChunkNum; i++ {
 		if doneSet[i] {
-			// Re-register owned chunk for P2P serving (checksum 0 is fine for ownership).
-			c.session.AddChunk(i, 0)
+			checksum, err := ck.CheckSum(i)
+			if err != nil {
+				delete(doneSet, i)
+				indices = append(indices, i)
+				continue
+			}
+			c.session.AddChunk(i, checksum)
 			_ = gspC.ReportChunk(c.session.UUID, i)
 			downloadedCount++
 			continue
@@ -358,17 +404,17 @@ func (c *Client) runDownload(ctx context.Context) {
 		var failedList []int64
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		limit := make(chan struct{}, 5) // 控制并发数
+		limit := make(chan struct{}, 8)
 
+	dispatchChunks:
 		for _, idx := range indices {
 			select {
 			case <-ctx.Done():
-				// drain workers
-			default:
+				break dispatchChunks
+			case limit <- struct{}{}:
 			}
 
 			wg.Add(1)
-			limit <- struct{}{}
 
 			go func(i int64) {
 				defer wg.Done()
@@ -400,6 +446,10 @@ func (c *Client) runDownload(ctx context.Context) {
 				// 开始下载
 				tBegin := time.Now()
 				_, cm, err := gspC.GetChunk(targetAddr, i, &ck)
+				if err != nil && targetAddr != c.senderAddr {
+					_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, 0, "failed")
+					_, cm, err = gspC.GetChunk(c.senderAddr, i, &ck)
+				}
 				if err != nil {
 					// 上报失败，以扣减提供端的并发连接数
 					_ = gspC.ReportPeer(c.session.UUID, reChunk.UUID, 0, "failed")
@@ -412,7 +462,7 @@ func (c *Client) runDownload(ctx context.Context) {
 				duration := time.Since(tBegin).Microseconds()
 				var speedMbps int64 = 0
 				if duration > 0 {
-					speedMbps = (_const.ChunkSize / duration) * 8
+					speedMbps = (_const.ChunkSize * 8) / duration
 				}
 
 				c.session.AddChunk(i, cm)
@@ -463,6 +513,40 @@ func (c *Client) runDownload(ctx context.Context) {
 		indices = failedList
 	}
 
+	if err := f.Sync(); err != nil {
+		c.finishWithError(err, "sync file")
+		return
+	}
+	if c.expectedHash != "" {
+		c.mu.Lock()
+		c.status.Status = "verifying"
+		info := c.status
+		c.mu.Unlock()
+		c.updateProgress(info)
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			c.finishWithError(err, "verify file")
+			return
+		}
+		hash := sha256.New()
+		if _, err := io.Copy(hash, f); err != nil {
+			c.finishWithError(err, "verify file")
+			return
+		}
+		if fmt.Sprintf("%x", hash.Sum(nil)) != c.expectedHash {
+			_ = os.Remove(metaPath)
+			_ = os.Remove(fileName)
+			c.finishWithError(fmt.Errorf("SHA-256 mismatch"), "verify file")
+			return
+		}
+		if ctx.Err() != nil {
+			c.finishCancelled()
+			return
+		}
+		if err := os.Rename(fileName, finalName); err != nil {
+			c.finishWithError(err, "publish file")
+			return
+		}
+	}
 	c.mu.Lock()
 	c.status.Status = "completed"
 	c.status.Percentage = 100.0
@@ -497,5 +581,7 @@ func saveChunkMeta(path string, set map[int64]bool) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0644)
+	if os.WriteFile(path+".tmp", data, 0600) == nil {
+		_ = os.Rename(path+".tmp", path)
+	}
 }

@@ -39,3 +39,17 @@ func (r *SettingsRepo) Set(key, value string) error {
 	}
 	return nil
 }
+
+func (repo *SettingsRepo) SetMany(values map[string]string) error {
+	transaction, err := repo.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	for key, value := range values {
+		if _, err := transaction.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}

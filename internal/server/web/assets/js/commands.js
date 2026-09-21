@@ -24,6 +24,7 @@ function loadCommands() {
         allDevices = devices;
         renderCommandPage(devices);
     }).fail(function() {
+        if (currentPage !== "commands") return;
         $("#content").html('<div class="empty-state">无法加载设备列表</div>');
     });
 }
@@ -31,6 +32,7 @@ function loadCommands() {
 // ---- Page render ----
 
 function renderCommandPage(devices) {
+    if (currentPage !== "commands") return;
     allDevices = devices;
     var html = '' +
     '<h2 class="section-title">命令执行</h2>' +

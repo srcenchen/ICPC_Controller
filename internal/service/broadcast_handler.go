@@ -146,6 +146,21 @@ func (h *BroadcastHandler) DeletePage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "deleted"})
 }
 
+func (h *BroadcastHandler) DuplicatePage(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid id"})
+		return
+	}
+	newID, err := h.repo.DuplicatePage(id)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	h.pushToAllModes()
+	writeJSON(w, 201, map[string]int64{"id": newID})
+}
+
 func (h *BroadcastHandler) ReorderPages(w http.ResponseWriter, r *http.Request) {
 	var pages []model.BroadcastPage
 	if err := json.NewDecoder(r.Body).Decode(&pages); err != nil {
@@ -216,13 +231,6 @@ func (h *BroadcastHandler) DeleteItem(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
 		return
-	}
-	// If the item is an image, delete the image file from disk.
-	item, err := h.repo.GetItemByID(id)
-	if err == nil && item.ItemType == "image" && item.Content != "" {
-		// Content is like "/broadcast/images/filename.png" — extract filename.
-		filename := filepath.Base(item.Content)
-		os.Remove(filepath.Join(broadcastDataDir, "images", filename))
 	}
 	if err := h.repo.DeleteItem(id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -439,6 +447,7 @@ func (h *BroadcastHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) 
 	if req.PushedState != nil {
 		h.repo.SetConfig("pushed_state", *req.PushedState)
 	}
+	h.pushToAllModes()
 	writeJSON(w, http.StatusOK, map[string]string{"message": "config updated"})
 }
 

@@ -5,11 +5,13 @@ function loadSettings() {
     $.getJSON("/api/settings", function(s) {
         renderPage(s);
     }).fail(function() {
+        if (currentPage !== "settings") return;
         $("#content").html('<div class="empty-state">加载设置失败</div>');
     });
 }
 
 function renderPage(settings) {
+    if (currentPage !== "settings") return;
     var html =
         '<h2>系统设置</h2>' +
 
@@ -140,6 +142,10 @@ function renderPage(settings) {
         '</div>';
 
     $("#content").html(html);
+	if (typeof deploymentSettingsHTML === "function") {
+		$("#content > h2").after(deploymentSettingsHTML(settings.deployment));
+		bindDeploymentSettings(settings.deployment);
+	}
 
     // Hostname prefix.
     $("#hostname-prefix").on("input", function() {

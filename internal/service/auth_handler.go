@@ -1,8 +1,11 @@
 package service
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -144,9 +147,25 @@ type AuthHandler struct {
 
 // NewAuthHandler creates a new AuthHandler with a static signing key.
 func NewAuthHandler(settings *ServerSettings) *AuthHandler {
+	var key []byte
+	if settings.settingsRepo != nil {
+		stored, _ := settings.settingsRepo.Get("jwt_signing_key")
+		key, _ = base64.StdEncoding.DecodeString(stored)
+	}
+	if len(key) < 32 {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			panic(err)
+		}
+		if settings.settingsRepo != nil {
+			if err := settings.settingsRepo.Set("jwt_signing_key", base64.StdEncoding.EncodeToString(key)); err != nil {
+				log.Printf("[auth] signing key persistence failed: %v", err)
+			}
+		}
+	}
 	return &AuthHandler{
 		settings: settings,
-		jwtKey:   []byte("icpc-remote-control-jwt-secret-key-signature"),
+		jwtKey:   key,
 		limiter:  NewLoginRateLimiter(),
 	}
 }
@@ -294,7 +313,7 @@ func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
 		claims := &jwt.RegisteredClaims{}
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 			return h.jwtKey, nil
-		})
+		}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired())
 
 		if err != nil || !token.Valid {
 			h.unauthorized(w, r)

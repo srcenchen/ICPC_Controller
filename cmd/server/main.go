@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"syscall"
 
 	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/data"
@@ -15,16 +16,33 @@ import (
 func main() {
 	port := flag.String("port", "8080", "HTTP server port")
 	tcpPort := flag.String("tcp-port", "8081", "TCP port for client connections")
+	p2pPort := flag.String("p2p-port", "48080", "local P2P sender port")
 	dbPath := flag.String("db", "icpc.db", "SQLite database path")
 	bind := flag.String("bind", "", "IP address for avahi mDNS (auto-detect if empty)")
 	avahi := flag.Bool("avahi", true, "enable avahi mDNS publishing")
 	listIfaces := flag.Bool("list-interfaces", false, "list available network interfaces and exit")
 	hostnamePrefix := flag.String("hostname-prefix", "cwxu-icpc", "hostname prefix for client machines (e.g. 'cwxu-icpc' → 'cwxu-icpc-1')")
+	restore := flag.String("restore", "", "restore a verified backup ZIP while the server is stopped, then exit")
 	flag.Parse()
 
 	if *listIfaces {
 		server.ListInterfaces()
 		os.Exit(0)
+	}
+	lockFile, err := os.OpenFile(*dbPath+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		log.Fatal("database is in use; stop the server before restoring or launching another instance")
+	}
+	if *restore != "" {
+		if err := data.RestoreBackup(*restore, *dbPath, "data"); err != nil {
+			log.Fatalf("restore failed: %v", err)
+		}
+		log.Println("backup restored; previous database and data retained with .pre-restore suffix; restart the server")
+		return
 	}
 
 	bindIP := *bind
@@ -85,6 +103,18 @@ func main() {
 	authHandler := service.NewAuthHandler(settings)
 
 	service.DistributionMgr = service.NewDistributionManager(hub, "data/uploads")
+	service.DistributionMgr.SetTransferPort(*p2pPort)
+	service.DistributionMgr.SetTargetLookup(func() []int {
+		devices, err := deviceRepo.GetAll()
+		if err != nil {
+			return nil
+		}
+		ids := make([]int, 0, len(devices))
+		for _, device := range devices {
+			ids = append(ids, device.AssignedID)
+		}
+		return ids
+	})
 	service.DistributionMgr.SetHostnameLookup(func(deviceID int) string {
 		d, err := deviceRepo.GetByAssignedID(deviceID)
 		if err != nil || d == nil {
@@ -99,6 +129,7 @@ func main() {
 		return ""
 	})
 	distHandler := service.NewDistributionHandler(service.DistributionMgr)
+	federation := service.NewFederation(db, settings, deviceRepo, service.DistributionMgr, hub)
 	screenProxyH := service.NewScreenProxyHandler(deviceRepo)
 
 	powerHandler := service.NewPowerHandler(deviceRepo, dispatcher, scheduleRepo, hub, settings)
@@ -121,6 +152,8 @@ func main() {
 
 	// Start HTTP server.
 	cfg := server.Config{
+		Federation:    federation,
+		BackupH:       service.NewBackupHandler(db, settings),
 		Port:          *port,
 		BindIP:        bindIP,
 		DBPath:        *dbPath,

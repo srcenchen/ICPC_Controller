@@ -9,6 +9,10 @@
 *.db
 *.db-shm
 *.db-wal
+*.db.lock
+/data/uploads/
+/data/distribution-task.json*
+*.pre-restore-*
 
 # IDE
 .idea/

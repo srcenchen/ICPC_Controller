@@ -35,6 +35,10 @@ type ToolSession interface {
 // GetFileStatus 获取文件信息
 func GetFileStatus(conn net.Conn, data []byte, tool ToolSession) {
 	ck := tool.GetChunk()
+	if ck.FileStat == nil {
+		tool.CloseConn(conn)
+		return
+	}
 	resp, _ := json.Marshal(model.GetFileStatusResp{
 		FileName:  ck.FileStat.Name(),
 		FileSize:  ck.FileStat.Size(),

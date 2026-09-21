@@ -1,6 +1,6 @@
 // Broadcast admin page — interact.js canvas (V3 - Clock & Corner Fix)
 "use strict";
-var bcMode = "before", bcPages = [], bcFonts = [], bcConfig = {}, bcSelPage = null, bcSelItem = null;
+var bcMode = "before", bcPages = [], bcFonts = [], bcConfig = {}, bcSelPage = null, bcSelItem = null, bcDirty = false;
 
 // ==================== CSS INJECTION ====================
 function initStyles() {
@@ -40,6 +40,7 @@ function startClock() {
 }
 
 function loadBroadcastAdmin() {
+  if (deploymentConfig.mode === 'cloud' && selectedRoom && !broadcastRoomSelection.size) broadcastRoomSelection.add(selectedRoom);
   initStyles();
   $.when($.getJSON("/api/broadcast/config"), $.getJSON("/api/broadcast/fonts"))
       .done(function(cfg, fonts){ bcConfig=cfg[0]; bcFonts=fonts[0]; loadPages(); })
@@ -49,12 +50,15 @@ function loadBroadcastAdmin() {
 function loadPages() {
   $.getJSON("/api/broadcast/pages?mode=" + bcMode, function(data){
     bcPages = data.pages || data; // unwrap if response is {pages: [...]}
+    if (!bcPages.some(function(page) { return page.id === bcSelPage; })) bcSelPage = bcPages.length ? bcPages[0].id : null;
+    bcDirty = false;
     render();
   });
 }
 
 // ==================== RENDER (APP SHELL) ====================
 function render() {
+  if (currentPage !== 'broadcast') return;
   if ($('#bc-app-root').length === 0) {
     $("#content").html(`
             <div id="bc-app-root">
@@ -62,8 +66,10 @@ function render() {
                 <div class="bc-editor-layout">
                     <div id="bc-sidebar"></div>
                     <div id="bc-main"></div>
+                    <div id="bc-inspector"></div>
                 </div>
                 <div id="bc-config" class="bc-config-layout"></div>
+                <details class="ops-assets"><summary>字体与素材管理</summary><div id="bc-assets"></div></details>
             </div>
         `);
     startClock();
@@ -71,14 +77,20 @@ function render() {
   }
 
   $('#bc-header').html(renderHeaderHtml());
+  renderBroadcastTargets();
   $('#bc-config').html(renderConfigHtml());
+  $('#bc-assets').html(renderFontCard());
   updateUI();
 }
 
 function updateUI() {
   try {
-    $('#bc-sidebar').html(renderFontCard() + renderPageCard() + renderLayerCard());
+    $('#bc-sidebar').html(renderPageCard() + renderLayerCard());
     $('#bc-main').html(renderEditor());
+    var selectedPage = bcPages.find(function(page) { return page.id === bcSelPage; });
+    var selectedItem = selectedPage && (selectedPage.items || []).find(function(item) { return item.id === bcSelItem; });
+    $('#bc-inspector').html('<div class="settings-card"><h4>元素属性 <span id="bc-save-state" class="badge">已保存</span></h4>' + (selectedItem ? renderProps(selectedItem) : '<p class="settings-desc">选择画布中的元素或左侧图层，编辑文字、位置和样式。</p>') + '</div>');
+    $('#bc-main input, #bc-inspector input, #bc-inspector textarea, #bc-inspector select').on('input change', function() { bcDirty = true; $('#bc-save-state').text('未保存'); });
     setTimeout(updateCanvasInfo, 100);
   } catch(e) {
     console.error('updateUI error:', e);
@@ -92,19 +104,22 @@ function renderHeaderHtml() {
       ? ('<span class="badge badge-online" style="margin-left: 10px; font-size: 12px; vertical-align: middle;">已推送: ' + (pushedMode === 'before' ? '赛前' : pushedMode === 'contesting' ? '赛中' : '赛后') + '</span>') 
       : '<span class="badge badge-offline" style="margin-left: 10px; font-size: 12px; vertical-align: middle;">未推送</span>';
 
+  if (deploymentConfig.mode === 'cloud') statusText = '<span class="badge" style="margin-left:10px">云端内容 · 保存后发布</span>';
   let h = '<div class="page-header">' +
       '<div style="display:flex;align-items:center;"><h2 class="section-title" style="margin:0;">广播管理</h2>' + statusText + '</div>' +
       '<div style="display:flex;gap:6px;">' +
       '<button class="btn btn-sm btn-outline" onclick="openPreview()">预览</button>' +
       '<button class="btn btn-sm btn-outline" onclick="syncReset()" title="复位同步时钟">复位</button>' +
-      '<button class="btn btn-sm btn-primary" onclick="pushToDevices()">推送</button>' +
+      '<button class="btn btn-sm btn-primary" onclick="if(bcCanLeave())pushToDevices()">推送到选手机</button>' +
       '<button class="btn btn-sm btn-danger" onclick="pushKillBroadcast()">关闭广播</button>' +
       '</div></div>';
   h += '<div class="tabs" style="margin-bottom:12px;">' + mt("before","赛前") + mt("contesting","赛中") + mt("after","赛后") + '</div>';
+  if (deploymentConfig.mode === 'cloud') h += cloudBroadcastControlsHTML();
   return h;
 }
 
 function syncReset() {
+  if (deploymentConfig.mode === 'cloud') { publishCloudBroadcast('reset'); return; }
   if(!confirm("复位同步时钟？所有展示端将从第一页重新开始轮播。")) return;
   $.ajax({url:"/api/broadcast/config",method:"PUT",contentType:"application/json",
     data:JSON.stringify({sync_reset:bcMode}),
@@ -112,12 +127,14 @@ function syncReset() {
 }
 
 function renderConfigHtml() {
+  if (deploymentConfig.mode === 'cloud') return '<div class="settings-card"><h4>倒计时</h4><div class="ops-toolbar"><input id="countdown-target" placeholder="倒计时目标时间" value="'+esc(bcConfig.countdown_target||'')+'"><button class="btn btn-primary" onclick="saveCfg(\'countdown_target\',$(\'#countdown-target\').val().trim())">保存</button></div><p class="settings-desc">推送地址使用各机房本地配置，不把云端地址下发给选手机。</p></div>' + fleetJobsHTML();
   return '<div class="settings-card" style="padding:10px;"><h4 style="font-size:13px;margin-bottom:6px;">倒计时</h4><div style="display:flex;gap:6px;"><input id="countdown-target" placeholder="2026-06-16T14:00:00" value="'+esc(bcConfig.countdown_target||'')+'" style="flex:1;font-size:12px;"><button class="btn btn-sm btn-primary" onclick="saveCfg(\'countdown_target\',$(\'#countdown-target\').val().trim())">保存</button></div></div>'+
   '<div class="settings-card" style="padding:10px;"><h4 style="font-size:13px;margin-bottom:6px;">推送地址</h4><div style="display:flex;gap:6px;"><input id="broadcast-base-url" placeholder="http://icpc-server.local:8082" value="'+esc(bcConfig.base_url||'')+'" style="flex:1;font-size:12px;"><button class="btn btn-sm btn-primary" onclick="saveCfg(\'base_url\',$(\'#broadcast-base-url\').val().trim())">保存</button></div></div>';
 }
 
 function mt(m,label){ return `<button class="tab${m===bcMode?' active':''}" onclick="switchMode('${m}')">${label}</button>`; }
-function switchMode(m){ bcMode=m; bcSelPage=null; bcSelItem=null; loadPages(); }
+function bcCanLeave() { return !bcDirty || confirm('存在未保存的修改，是否放弃这些修改？'); }
+function switchMode(m){ if(!bcCanLeave())return; bcMode=m; bcSelPage=null; bcSelItem=null; loadPages(); }
 
 // ==================== SIDEBAR ====================
 function renderFontCard() {
@@ -131,7 +148,7 @@ function renderFontCard() {
 function renderPageCard() {
   var rows=bcPages.map((p,i) => {
     var sel=bcSelPage===p.id?'border-color:var(--accent)!important;background:rgba(13,110,253,0.06);':'';
-    return `<div style="${sel}cursor:pointer;margin-bottom:3px;" class="device-card" onclick="selectPage(${p.id})"><div class="device-card-name" style="font-size:12px;">${i+1}. ${esc(p.title||'未命名')}</div><div class="device-card-meta">${p.duration_ms/1000}s · ${(p.items||[]).length} 元素</div></div>`;
+    return `<div style="${sel}cursor:pointer;margin-bottom:8px;" class="device-card" onclick="selectPage(${p.id})"><div class="device-card-name" style="font-size:12px;">${i+1}. ${esc(p.title||'未命名')}</div><div class="device-card-meta">${p.duration_ms/1000}s · ${(p.items||[]).length} 元素</div><div class="bc-page-actions"><button class="btn btn-sm btn-outline" aria-label="上移页面" ${i===0?'disabled':''} onclick="event.stopPropagation();moveBroadcastPage(${i},-1)">↑</button><button class="btn btn-sm btn-outline" aria-label="下移页面" ${i===bcPages.length-1?'disabled':''} onclick="event.stopPropagation();moveBroadcastPage(${i},1)">↓</button><button class="btn btn-sm btn-outline" onclick="event.stopPropagation();duplicateBroadcastPage(${p.id})">复制</button></div></div>`;
   }).join("")||'<div class="empty-state" style="padding:10px;font-size:12px;">暂无页面</div>';
   return `<div class="settings-card" style="padding:8px;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><h4 style="font-size:13px;margin:0;">页面</h4><button class="btn btn-sm btn-primary" style="font-size:10px;padding:2px 7px;" onclick="addPage()">+ 添加</button></div><div style="max-height:220px;overflow-y:auto;">${rows}</div></div>`;
 }
@@ -162,8 +179,21 @@ function renderLayerCard() {
         </div>`;
 }
 
-function selectPage(id){ bcSelPage=id; bcSelItem=null; updateUI(); }
-function selectItem(id) { bcSelItem=id; updateUI(); }
+function selectPage(id){ if(!bcCanLeave())return; bcDirty=false;bcSelPage=id; bcSelItem=null; updateUI(); }
+function selectItem(id) { if (id === bcSelItem) return; if(!bcCanLeave())return;bcDirty=false; bcSelItem=id; updateUI(); }
+
+function moveBroadcastPage(index, delta) {
+  if (!bcCanLeave()) return;
+  var pages = bcPages.slice(), next = index + delta;
+  if (next < 0 || next >= pages.length) return;
+  var moved = pages.splice(index, 1)[0]; pages.splice(next, 0, moved);
+  $.ajax({url:'/api/broadcast/pages/reorder',method:'PUT',contentType:'application/json',data:JSON.stringify(pages.map(function(page){return {id:page.id};}))}).done(function(){showToast('页面顺序已保存','success');loadPages();});
+}
+
+function duplicateBroadcastPage(id) {
+  if (!bcCanLeave()) return;
+  $.ajax({url:'/api/broadcast/pages/'+id+'/duplicate',method:'POST'}).done(function(page){bcSelPage=page.id;bcSelItem=null;showToast('页面已复制','success');loadPages();});
+}
 
 function changeZ(id, delta, e) {
   e.stopPropagation();
@@ -203,7 +233,7 @@ function renderEditor() {
          </div>`;
 
   // 移除了滚动通告，加入了时钟
-  h += `<div style="display:flex;gap:6px;margin-bottom:8px;padding:8px;background:rgba(255,255,255,0.05);border:1px solid #333;border-radius:6px;flex-wrap:wrap;">
+  h += `<div style="display:flex;gap:8px;margin-bottom:16px;padding:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;flex-wrap:wrap;">
          <button class="btn btn-sm btn-outline" onclick="addItem('text')">+ 文字</button>
          <button class="btn btn-sm btn-outline" onclick="addItem('image')">+ 图片</button>
          <button class="btn btn-sm btn-outline" onclick="addItem('clock')">+ 时钟</button>
@@ -216,17 +246,7 @@ function renderEditor() {
   h += '</div>';
   h += '<div id="bc-canvas-info" style="font-size:10px;color:var(--text-secondary);margin-top:4px;text-align:right;">画布: <span id="bc-canvas-w">--</span>px × <span id="bc-canvas-h">--</span>px (16:9) | 字号为 vh% 等比缩放</div>';
 
-  if(bcSelItem) {
-    var it = (page.items || []).find(x => x.id === bcSelItem);
-    if(it) {
-      h += '<div class="settings-card" style="margin-top:12px;padding:12px;border-top:3px solid var(--accent);">';
-      h += '<h4 style="font-size:13px;margin-top:0;margin-bottom:10px;">编辑属性</h4>';
-      h += renderProps(it);
-      h += '</div>';
-    }
-  } else {
-    h += '<div style="margin-top:12px;text-align:center;font-size:12px;color:var(--text-secondary);padding:10px;">在画布或左侧图层列表点击元素进行编辑</div>';
-  }
+  h += '<p class="settings-desc" style="margin-top:12px">拖动元素调整位置，拖动圆点调整大小。位置自动保存；文字与样式请在右侧保存。</p>';
 
   return h;
 }
@@ -247,7 +267,7 @@ function renderItem(it) {
 
   switch(it.item_type) {
     case "text": inner = `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:${align};text-align:${it.text_align||'center'};white-space:pre-wrap;line-height:1.2;">${esc(it.content||"文字")}</div>`; break;
-    case "image": inner = `<img src="${it.content}" style="width:100%;height:100%;object-fit:contain;">`; break;
+    case "image": inner = `<img src="${esc(it.content)}" style="width:100%;height:100%;object-fit:contain;">`; break;
     case "clock": inner = `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:${align};white-space:nowrap;font-family:monospace;" class="bc-clock-val">00:00:00</div>`; break;
   }
 
@@ -489,6 +509,7 @@ function saveProps(id){
 function saveCfg(key,val){ var d={};d[key]=val;if(key==='base_url')bcConfig.base_url=val; $.ajax({url:"/api/broadcast/config",method:"PUT",contentType:"application/json",data:JSON.stringify(d),success:function(){alert("已保存");}}); }
 function openPreview(){window.open("/broadcast/"+bcMode,"_blank");}
 function pushToDevices(){
+  if (deploymentConfig.mode === 'cloud') { publishCloudBroadcast('start'); return; }
   var base=bcConfig.base_url||"http://icpc-server.local:8082",url=base+"/broadcast/"+bcMode,cmd="full-firefox "+url;
   if(!confirm("向目标推送广播？\n命令: "+cmd))return;
 
@@ -514,6 +535,7 @@ function pushToDevices(){
 }
 
 function pushKillBroadcast(){
+  if (deploymentConfig.mode === 'cloud') { publishCloudBroadcast('stop'); return; }
   var cmd="full-firefox kill";
   if(!confirm("关闭广播？"))return;
   $.ajax({

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type DistributionHandler struct {
@@ -29,6 +30,12 @@ func (h *DistributionHandler) ListFiles(w http.ResponseWriter, r *http.Request) 
 
 // UploadFile handles file upload using chunked/streaming multi-part form (POST /api/distribution/upload)
 func (h *DistributionHandler) UploadFile(w http.ResponseWriter, r *http.Request) {
+	h.mgr.fileMu.Lock()
+	defer h.mgr.fileMu.Unlock()
+	if h.mgr.IsRunning() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "分发中不可覆盖文件"})
+		return
+	}
 	// Parse up to 10MB in memory, rest goes to disk temp files automatically
 	err := r.ParseMultipartForm(10 << 20)
 	if err != nil {
@@ -37,6 +44,7 @@ func (h *DistributionHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 	}
 
 	file, header, err := r.FormFile("file")
+	defer r.MultipartForm.RemoveAll()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no file found in request"})
 		return
@@ -44,12 +52,17 @@ func (h *DistributionHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 	defer file.Close()
 
 	destPath := filepath.Join(h.mgr.uploadDir, filepath.Base(header.Filename))
-	out, err := os.Create(destPath)
+	if strings.HasPrefix(filepath.Base(header.Filename), ".") {
+		writeJSON(w, 400, map[string]string{"error": "不支持隐藏文件名"})
+		return
+	}
+	out, err := os.CreateTemp(h.mgr.uploadDir, ".upload-*")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create target file"})
 		return
 	}
 	defer out.Close()
+	defer os.Remove(out.Name())
 
 	_, err = io.Copy(out, file)
 	if err != nil {
@@ -57,6 +70,18 @@ func (h *DistributionHandler) UploadFile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := out.Sync(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := out.Close(); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := os.Rename(out.Name(), destPath); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
 	log.Printf("[dist-upload] successfully uploaded: %s (%d bytes)", header.Filename, header.Size)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "upload successful", "filename": header.Filename})
 }
@@ -74,6 +99,8 @@ func (h *DistributionHandler) DeleteFiles(w http.ResponseWriter, r *http.Request
 	for _, name := range body.Filenames {
 		if err := h.mgr.DeleteFile(name); err != nil {
 			log.Printf("[dist] failed to delete file %s: %v", name, err)
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "selected files deleted"})
@@ -130,9 +157,6 @@ func (h *DistributionHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-
-	task.mu.RLock()
-	defer task.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, task)
 }

@@ -157,6 +157,9 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 		conn.Close()
 		h.decConn()
 	}()
+	if h.settings.GetDeployment().Mode == "cloud" {
+		return
+	}
 
 	// Enable TCP keepalive so the OS detects dead connections within seconds.
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -178,26 +181,10 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 	}
 
 	// Atomic ID assignment — prevents concurrent clients getting the same ID.
-	assignedID, existingDevice, newlyAllocated, err := h.idAssigner.AssignOrReuseTracked(regReq.MacAddress, regReq.AssignedID)
+	assignedID, existingDevice, _, err := h.idAssigner.AssignIdentity(regReq.MacAddress, regReq.IdentityKey, regReq.AssignedID)
 	if err != nil {
 		log.Printf("[tcp] id assignment error: %v", err)
 		return
-	}
-
-	// A fresh allocation inserts a placeholder row; drop it if this client
-	// disconnects before reporting system info (otherwise "pending" ghosts stay).
-	sysInfoReceived := false
-	if newlyAllocated {
-		defer func() {
-			if sysInfoReceived {
-				return
-			}
-			if err := h.deviceRepo.Delete(assignedID); err != nil {
-				log.Printf("[tcp] cleanup placeholder row #%d: %v", assignedID, err)
-			} else {
-				log.Printf("[tcp] removed placeholder row #%d (no system_info received)", assignedID)
-			}
-		}()
 	}
 
 	clientConn := &biz.ClientConn{
@@ -226,7 +213,6 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 	if err := json.Unmarshal([]byte(line), &sysMsg); err != nil || sysMsg.Type != "system_info" {
 		return
 	}
-	sysInfoReceived = true
 
 	rawJSON, _ := json.Marshal(sysMsg.Info)
 	device, err := model.ParseFastFetch(rawJSON)
@@ -581,6 +567,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 				continue
 			}
 			if DistributionMgr != nil {
+				msg.DeviceID = assignedID
 				DistributionMgr.HandleProgressReport(msg)
 			}
 

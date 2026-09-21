@@ -5,11 +5,13 @@ function loadDashboard() {
         $.getJSON("/api/distribution/status").then(null, function() { return $.Deferred().resolve([null]).promise(); }),
         $.getJSON("/api/checkin/stats").then(null, function() { return $.Deferred().resolve([{}]).promise(); })
     ).done(function(statsRes, distRes, checkinRes) {
+        if (currentPage !== "dashboard") return;
         var stats = statsRes[0] || statsRes;
         var dist = distRes && distRes[0] ? distRes[0] : null;
         var checkin = checkinRes && checkinRes[0] ? checkinRes[0] : {};
         renderDashboard(stats, dist, checkin);
     }).fail(function() {
+        if (currentPage !== "dashboard") return;
         $("#content").html('<div class="empty-state">无法加载仪表盘数据 — 请检查服务端是否运行</div>');
     });
 }
@@ -43,6 +45,7 @@ function patchDashboardTasks() {
 }
 
 function renderDistSummary(dist) {
+    if (!dist || dist.status === "idle") return '<div class="empty-state" style="padding:12px;">暂无进行中的分发</div>';
     if (!dist || !dist.task_id && !dist.status) {
         // status API may return full task object
         if (!dist || dist.status === undefined) {
@@ -67,7 +70,7 @@ function renderDistSummary(dist) {
     var avg = total > 0 ? (sumPct / total) : (dist.avg_pct || 0);
     return '' +
         '<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;">' +
-            '<span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(status) + '</span>' +
+            '<span class="badge badge-' + escapeHtml(status) + '">' + escapeHtml(statusLabel(status)) + '</span>' +
             '<span>文件: <code>' + escapeHtml(String(file)) + '</code></span>' +
             '<span>进度: ' + avg.toFixed(1) + '%</span>' +
             '<span>完成 ' + completed + ' / 失败 ' + failed + ' / 共 ' + total + '</span>' +
@@ -76,6 +79,7 @@ function renderDistSummary(dist) {
 }
 
 function renderDashboard(stats, dist, checkin) {
+    if (currentPage !== "dashboard") return;
     var unchecked = checkin.not_checked != null ? checkin.not_checked :
         Math.max(0, (stats.total_devices || 0) - (stats.checked_in || 0));
     var html = '' +

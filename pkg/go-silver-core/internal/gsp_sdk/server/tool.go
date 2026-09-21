@@ -16,16 +16,21 @@ func (s *Session) GetMemPool() *mempool.MemPool {
 
 // GetChunk 获取块实体
 func (s *Session) GetChunk() chunk.FileChunk {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.chunkProvider
 }
 
 // ReadChunk 获取Chunk块
 func (s *Session) ReadChunk(i int64, buf []byte) (int, error) {
-	return s.chunkProvider.ReadChunk(i, buf)
+	provider := s.GetChunk()
+	return provider.ReadChunk(i, buf)
 }
 
 // GetQueue 获取队列
 func (s *Session) GetQueue() queue.DownloadQueue {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.queue == nil {
 		s.queue = &queue2{s: s}
 	}
@@ -49,7 +54,10 @@ func (s *Session) IndexValid(i int64) (bool, uint32) {
 	}
 	buf := s.memPool.Get(_const.ChunkSize)
 	defer s.memPool.Put(buf)
-	c, _ := s.chunkProvider.ReadChunk(i, *buf)
+	c, err := s.chunkProvider.ReadChunk(i, *buf)
+	if err != nil {
+		return false, 0
+	}
 	cm := crc32.ChecksumIEEE((*buf)[:c])
 	s.chunkHash[i] = cm
 	return true, cm
@@ -80,6 +88,8 @@ func (s *Session) UpdatePeer(providerUuid string, speed int64) {
 
 // IsMain 是否为主发送端
 func (s *Session) IsMain() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.isMain
 }
 

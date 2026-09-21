@@ -82,7 +82,8 @@ function connectTermSocket(deviceId) {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var cols = termInstance ? termInstance.cols : 100;
     var rows = termInstance ? termInstance.rows : 28;
-    termSocket = new WebSocket(proto + "//" + location.host + "/ws/terminal/" + deviceId + "?cols=" + cols + "&rows=" + rows);
+    var terminalPath = typeof selectedRoom !== "undefined" && selectedRoom ? "/ws/cluster/rooms/" + encodeURIComponent(selectedRoom) + "/terminal/" : "/ws/terminal/";
+    termSocket = new WebSocket(proto + "//" + location.host + terminalPath + deviceId + "?cols=" + cols + "&rows=" + rows);
     termSocket.binaryType = "arraybuffer";
 
     termSocket.onopen = function() {

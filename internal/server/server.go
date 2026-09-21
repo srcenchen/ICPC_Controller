@@ -22,14 +22,17 @@ var webFS embed.FS
 
 // Server is the main HTTP server.
 type Server struct {
-	httpServer  *http.Server
-	avahiCmd    *exec.Cmd
-	bindIP      string
-	enableAvahi bool
+	stopBackground context.CancelFunc
+	httpServer     *http.Server
+	avahiCmd       *exec.Cmd
+	bindIP         string
+	enableAvahi    bool
 }
 
 // Config holds server configuration.
 type Config struct {
+	Federation    *service.Federation
+	BackupH       *service.BackupHandler
 	Port          string
 	BindIP        string
 	DBPath        string
@@ -53,6 +56,22 @@ type Config struct {
 // New creates a new Server.
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
+	if cfg.Federation != nil {
+		mux.HandleFunc("GET /api/cluster/status", cfg.Federation.Status)
+		mux.HandleFunc("GET /api/cluster/rooms", cfg.Federation.Rooms)
+		mux.HandleFunc("POST /api/cluster/jobs", cfg.Federation.Queue)
+		mux.HandleFunc("GET /api/cluster/jobs", cfg.Federation.Jobs)
+		mux.HandleFunc("POST /api/cluster/broadcast", cfg.Federation.PublishBroadcast)
+		mux.HandleFunc("DELETE /api/cluster/jobs/{id}", cfg.Federation.CancelJob)
+		for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+			mux.HandleFunc(method+" /api/cluster/rooms/{room}/proxy/{path...}", cfg.Federation.Proxy)
+		}
+		mux.HandleFunc("GET /ws/cluster/rooms/{room}/terminal/{id}", cfg.Federation.Terminal)
+	}
+	if cfg.BackupH != nil {
+		mux.HandleFunc("GET /api/data/backup", cfg.BackupH.Download)
+		mux.HandleFunc("GET /api/data/export", cfg.BackupH.Export)
+	}
 
 	if cfg.AuthH != nil {
 		mux.HandleFunc("POST /api/auth/login", cfg.AuthH.Login)
@@ -102,6 +121,7 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("POST /api/broadcast/pages", cfg.BroadcastH.CreatePage)
 		mux.HandleFunc("PUT /api/broadcast/pages/{id}", cfg.BroadcastH.UpdatePage)
 		mux.HandleFunc("DELETE /api/broadcast/pages/{id}", cfg.BroadcastH.DeletePage)
+		mux.HandleFunc("POST /api/broadcast/pages/{id}/duplicate", cfg.BroadcastH.DuplicatePage)
 		mux.HandleFunc("PUT /api/broadcast/pages/reorder", cfg.BroadcastH.ReorderPages)
 		mux.HandleFunc("GET /api/broadcast/items", cfg.BroadcastH.ListItems)
 		mux.HandleFunc("POST /api/broadcast/items", cfg.BroadcastH.CreateItem)
@@ -182,12 +202,24 @@ func New(cfg Config) *Server {
 	mux.Handle("GET /", noCacheFS)
 
 	var handler http.Handler = mux
+	ctx, stopBackground := context.WithCancel(context.Background())
+	if cfg.Federation != nil {
+		cfg.Federation.ConfigureBroadcast(cfg.BroadcastH, cfg.BackupH)
+		cfg.Federation.Start(ctx, mux)
+	}
 	if cfg.AuthH != nil {
 		handler = cfg.AuthH.AuthMiddleware(mux)
+	}
+	if cfg.Federation != nil {
+		handler = cfg.Federation.NodeAuth(handler)
+	}
+	if cfg.BackupH != nil {
+		handler = cfg.BackupH.Guard(handler)
 	}
 	handler = Recovery(Logger(handler))
 
 	return &Server{
+		stopBackground: stopBackground,
 		httpServer: &http.Server{
 			Addr:         ":" + cfg.Port,
 			Handler:      handler,
@@ -202,6 +234,7 @@ func New(cfg Config) *Server {
 
 // Start begins listening and handles graceful shutdown.
 func (s *Server) Start() error {
+	defer s.stopBackground()
 	if s.enableAvahi {
 		go s.startAvahi()
 	} else {

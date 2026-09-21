@@ -3,11 +3,13 @@ function loadDevices() {
     $.getJSON("/api/devices", function(devices) {
         renderDevices(devices);
     }).fail(function() {
+        if (currentPage !== "devices") return;
         $("#content").html('<div class="empty-state">无法加载设备列表</div>');
     });
 }
 
 function renderDevices(devices) {
+    if (currentPage !== "devices") return;
     var rows = devices.length === 0
         ? '<tr><td colspan="11" class="empty-state">暂无已注册设备</td></tr>'
         : devices.map(function(d) {
@@ -49,10 +51,17 @@ function renderDevices(devices) {
 
     $("#content").html(html);
     updateStatusBar();
+    if (typeof pendingCloudDevice !== 'undefined' && pendingCloudDevice && pendingCloudDevice.room === selectedRoom) {
+        var deviceID = pendingCloudDevice.device;
+        pendingCloudDevice = null;
+        showDeviceDetail(deviceID);
+    }
 }
 
 function showDeviceDetail(assignedID) {
+    var room = selectedRoom;
     $.getJSON("/api/devices/" + assignedID, function(device) {
+        if (currentPage !== 'devices' || room !== selectedRoom) return;
         renderDeviceDetail(device);
     }).fail(function() {
         alert("无法加载设备详情");

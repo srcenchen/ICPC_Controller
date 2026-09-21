@@ -1,23 +1,24 @@
 package service
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/model"
+	"github.com/google/uuid"
 	"go-silver-core/pkg/gosilver"
 )
 
-var (
-	DistributionMgr *DistributionManager
-)
+var DistributionMgr *DistributionManager
 
 type FileInfo struct {
 	Name    string `json:"name"`
@@ -32,24 +33,40 @@ type ClientProgress struct {
 	TotalChunks int64   `json:"total_chunks"`
 	Percentage  float64 `json:"percentage"`
 	SpeedMbps   int64   `json:"speed_mbps"`
-	Status      string  `json:"status"` // "idle", "downloading", "completed", "failed", "cancelled"
+	Status      string  `json:"status"`
 	Error       string  `json:"error,omitempty"`
 	UpdatedAt   string  `json:"updated_at"`
+	TransferID  string  `json:"transfer_id"`
+	Attempts    int     `json:"attempts"`
 }
 
 type DistributeTask struct {
-	TaskID       string                  `json:"task_id"`
-	Files        []string                `json:"files"`
-	SaveDir      string                  `json:"save_dir"`
-	ServerIP     string                  `json:"server_ip"`
-	PostCmd      string                  `json:"post_cmd"`
-	TargetIDs    []int                   `json:"target_ids"`
-	ActiveFile   string                  `json:"active_file"`
-	ActiveIdx    int                     `json:"active_idx"`
-	Status       string                  `json:"status"` // "running", "completed", "stopped"
-	Progresses   map[int]*ClientProgress `json:"progresses"`
+	TaskID       string                    `json:"task_id"`
+	Files        []string                  `json:"files"`
+	SaveDir      string                    `json:"save_dir"`
+	ServerIP     string                    `json:"server_ip"`
+	PostCmd      string                    `json:"post_cmd"`
+	TargetIDs    []int                     `json:"target_ids"`
+	ActiveFile   string                    `json:"active_file"`
+	ActiveIdx    int                       `json:"active_idx"`
+	Status       string                    `json:"status"`
+	Hashes       map[string]string         `json:"hashes"`
+	Results      map[string]map[int]string `json:"results"`
+	Progresses   map[int]*ClientProgress   `json:"progresses"`
 	activeServer *gosilver.Server
+	done         chan struct{}
 	mu           sync.RWMutex
+}
+
+func (task *DistributeTask) MarshalJSON() ([]byte, error) {
+	task.mu.RLock()
+	defer task.mu.RUnlock()
+	return json.Marshal(map[string]interface{}{
+		"task_id": task.TaskID, "files": task.Files, "save_dir": task.SaveDir,
+		"server_ip": task.ServerIP, "post_cmd": task.PostCmd, "target_ids": task.TargetIDs,
+		"active_file": task.ActiveFile, "active_idx": task.ActiveIdx, "status": task.Status,
+		"hashes": task.Hashes, "results": task.Results, "progresses": task.Progresses,
+	})
 }
 
 type PrecheckResult struct {
@@ -66,516 +83,503 @@ type PrecheckSession struct {
 }
 
 type DistributionManager struct {
-	uploadDir      string
-	hub            *biz.Hub
-	activeTask     *DistributeTask
-	taskMu         sync.Mutex
-	activePrecheck *PrecheckSession
-	hostnameLookup func(deviceID int) string
-	fileTimeout    time.Duration // per-file wait timeout
-	stallTimeout   time.Duration // no progress => stalled
+	uploadDir       string
+	hub             *biz.Hub
+	activeTask      *DistributeTask
+	taskMu          sync.Mutex
+	persistMu       sync.Mutex
+	fileMu          sync.Mutex
+	lastPersist     time.Time
+	lastPersistTask string
+	transferPort    string
+	targetLookup    func() []int
+	activePrecheck  *PrecheckSession
+	hostnameLookup  func(int) string
+	fileTimeout     time.Duration
+	stallTimeout    time.Duration
 }
 
 func NewDistributionManager(hub *biz.Hub, uploadDir string) *DistributionManager {
 	_ = os.MkdirAll(uploadDir, 0755)
-	// Multi-VLAN labs: allow all peers; same-room /24 still preferred by score.
-	// Operators can change via env ICPC_P2P_PEER_MODE=subnet|all
-	if mode := os.Getenv("ICPC_P2P_PEER_MODE"); mode != "" {
-		gosilver.SetPeerSelectMode(mode)
-	} else {
-		gosilver.SetPeerSelectMode("all")
+	mode := os.Getenv("ICPC_P2P_PEER_MODE")
+	if mode == "" {
+		mode = "all"
 	}
-	return &DistributionManager{
-		uploadDir:    uploadDir,
-		hub:          hub,
-		fileTimeout:  30 * time.Minute,
-		stallTimeout: 3 * time.Minute,
-	}
-}
-
-// SetHostnameLookup injects a device hostname resolver for progress display.
-func (mgr *DistributionManager) SetHostnameLookup(fn func(deviceID int) string) {
-	mgr.hostnameLookup = fn
-}
-
-// GetActiveTaskSnapshot returns a copy of active task status for dashboard (may be nil).
-func (mgr *DistributionManager) GetActiveTaskSnapshot() map[string]interface{} {
-	mgr.taskMu.Lock()
-	t := mgr.activeTask
-	mgr.taskMu.Unlock()
-	if t == nil {
-		return nil
-	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	completed, failed, total := 0, 0, len(t.Progresses)
-	var sumPct float64
-	for _, p := range t.Progresses {
-		sumPct += p.Percentage
-		switch p.Status {
-		case "completed":
-			completed++
-		case "failed", "cancelled", "stalled":
-			failed++
-		}
-	}
-	avg := 0.0
-	if total > 0 {
-		avg = sumPct / float64(total)
-	}
-	return map[string]interface{}{
-		"task_id":     t.TaskID,
-		"status":      t.Status,
-		"active_file": t.ActiveFile,
-		"active_idx":  t.ActiveIdx,
-		"files":       t.Files,
-		"total":       total,
-		"completed":   completed,
-		"failed":      failed,
-		"avg_pct":     avg,
-	}
-}
-
-// GetUploadedFiles scans the data/uploads directory and returns a list of files
-func (mgr *DistributionManager) GetUploadedFiles() ([]FileInfo, error) {
-	entries, err := os.ReadDir(mgr.uploadDir)
-	if err != nil {
-		return nil, err
-	}
-
-	files := make([]FileInfo, 0)
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		files = append(files, FileInfo{
-			Name:    info.Name(),
-			Size:    info.Size(),
-			ModTime: info.ModTime().Format("2006-01-02 15:04:05"),
-		})
-	}
-	return files, nil
-}
-
-// DeleteFile deletes a specific file in the uploads folder
-func (mgr *DistributionManager) DeleteFile(name string) error {
-	path := filepath.Join(mgr.uploadDir, filepath.Base(name))
-	return os.Remove(path)
-}
-
-// ClearAllFiles deletes all files in the uploads folder
-func (mgr *DistributionManager) ClearAllFiles() error {
-	entries, err := os.ReadDir(mgr.uploadDir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		_ = os.Remove(filepath.Join(mgr.uploadDir, entry.Name()))
-	}
-	return nil
-}
-
-// StartTask creates and runs a sequential P2P file distribution task
-func (mgr *DistributionManager) StartTask(files []string, saveDir string, targetIDs []int, serverIP string, postCmd string) (*DistributeTask, error) {
-	mgr.taskMu.Lock()
-	defer mgr.taskMu.Unlock()
-
-	if mgr.activeTask != nil && mgr.activeTask.Status == "running" {
-		return nil, fmt.Errorf("another distribution task is already running")
-	}
-
-	if len(files) == 0 {
-		return nil, fmt.Errorf("no files selected for distribution")
-	}
-
-	// Sanitize file names and verify under uploadDir
-	cleanFiles := make([]string, 0, len(files))
-	for _, f := range files {
-		base := filepath.Base(f)
-		path := filepath.Join(mgr.uploadDir, base)
-		if _, err := os.Stat(path); err != nil {
-			return nil, fmt.Errorf("file not found: %s", base)
-		}
-		cleanFiles = append(cleanFiles, base)
-	}
-	files = cleanFiles
-
-	if saveDir == "" {
-		saveDir = "./downloads"
-	}
-
-	// Resolve targets
-	var finalTargets []int
-	if len(targetIDs) == 0 {
-		mgr.hub.BroadcastAdminEvent("distribute_log", "未指定目标设备，自动选择所有在线选手机进行分发")
-		finalTargets = mgr.hub.OnlineIDs()
-	} else {
-		finalTargets = targetIDs
-	}
-
-	if len(finalTargets) == 0 {
-		return nil, fmt.Errorf("no online devices available to distribute files to")
-	}
-
-	// Initialize progresses
-	progresses := make(map[int]*ClientProgress)
-	for _, deviceID := range finalTargets {
-		hostname := fmt.Sprintf("#%d", deviceID)
-		if mgr.hostnameLookup != nil {
-			if h := mgr.hostnameLookup(deviceID); h != "" {
-				hostname = h
+	gosilver.SetPeerSelectMode(mode)
+	manager := &DistributionManager{uploadDir: uploadDir, hub: hub, fileTimeout: 30 * time.Minute, stallTimeout: 3 * time.Minute, transferPort: "48080"}
+	if raw, err := os.ReadFile(manager.statePath()); err == nil {
+		var task DistributeTask
+		if json.Unmarshal(raw, &task) == nil && task.TaskID != "" {
+			if task.Status == "running" {
+				task.Status = "failed"
 			}
-		}
-		progresses[deviceID] = &ClientProgress{
-			DeviceID:  deviceID,
-			Hostname:  hostname,
-			Status:    "idle",
-			UpdatedAt: time.Now().Format("2006-01-02 15:04:05"),
+			if task.Results == nil {
+				task.Results = make(map[string]map[int]string)
+			}
+			manager.activeTask = &task
 		}
 	}
-
-	task := &DistributeTask{
-		TaskID:     fmt.Sprintf("task_%d", time.Now().UnixNano()),
-		Files:      files,
-		SaveDir:    saveDir,
-		ServerIP:   serverIP,
-		PostCmd:    postCmd,
-		TargetIDs:  finalTargets,
-		Status:     "running",
-		Progresses: progresses,
-	}
-
-	mgr.activeTask = task
-	go task.run(mgr)
-
-	return task, nil
+	return manager
 }
 
-// StopTask cancels the active task and stops any running GoSilver server
-func (mgr *DistributionManager) StopTask() error {
-	mgr.taskMu.Lock()
-	t := mgr.activeTask
-	mgr.taskMu.Unlock()
-
-	if t == nil {
-		return fmt.Errorf("no active task running")
-	}
-
-	t.mu.Lock()
-	t.Status = "stopped"
-	if t.activeServer != nil {
-		t.activeServer.Stop()
-	}
-	t.mu.Unlock()
-
-	// Notify clients to cancel
-	cancelMsg := model.DistributeCancelMessage{
-		Type:   "distribute_cancel",
-		TaskID: t.TaskID,
-	}
-	msgBytes, _ := json.Marshal(cancelMsg)
-	msgBytes = append(msgBytes, '\n')
-	mgr.hub.BroadcastToClients(msgBytes)
-
-	mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
-	return nil
+func (mgr *DistributionManager) statePath() string {
+	return filepath.Join(filepath.Dir(mgr.uploadDir), "distribution-task.json")
 }
-
-// GetActiveTask returns the currently running task, or nil
+func (mgr *DistributionManager) SetHostnameLookup(lookup func(int) string) {
+	mgr.hostnameLookup = lookup
+}
+func (mgr *DistributionManager) SetTargetLookup(lookup func() []int) { mgr.targetLookup = lookup }
+func (mgr *DistributionManager) SetTransferPort(port string)         { mgr.transferPort = port }
 func (mgr *DistributionManager) GetActiveTask() *DistributeTask {
 	mgr.taskMu.Lock()
 	defer mgr.taskMu.Unlock()
 	return mgr.activeTask
 }
-
-// HandleProgressReport handles real-time download status reports from clients
-func (mgr *DistributionManager) HandleProgressReport(msg model.DistributeProgressMessage) {
-	mgr.taskMu.Lock()
-	t := mgr.activeTask
-	mgr.taskMu.Unlock()
-
-	if t == nil || t.TaskID != msg.TaskID {
-		return
+func (mgr *DistributionManager) IsRunning() bool {
+	task := mgr.GetActiveTask()
+	if task == nil {
+		return false
 	}
-
-	t.mu.Lock()
-	p, ok := t.Progresses[msg.DeviceID]
-	if ok {
-		p.Downloaded = msg.Downloaded
-		p.TotalChunks = msg.TotalChunks
-		p.Percentage = msg.Percentage
-		p.SpeedMbps = msg.SpeedMbps
-		p.Status = msg.Status
-		p.Error = msg.Error
-		p.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
+	task.mu.RLock()
+	defer task.mu.RUnlock()
+	if task.done != nil {
+		select {
+		case <-task.done:
+		default:
+			return true
+		}
 	}
-	t.mu.Unlock()
-
-	mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
+	return task.Status == "running"
+}
+func (mgr *DistributionManager) publish(task *DistributeTask, event string) {
+	mgr.persistMu.Lock()
+	raw, err := json.Marshal(task)
+	if err == nil && (event == "distribute_task_finished" || task.TaskID != mgr.lastPersistTask || time.Since(mgr.lastPersist) > 2*time.Second) {
+		if os.WriteFile(mgr.statePath()+".tmp", raw, 0600) == nil {
+			_ = os.Rename(mgr.statePath()+".tmp", mgr.statePath())
+		}
+		mgr.lastPersist = time.Now()
+		mgr.lastPersistTask = task.TaskID
+	}
+	mgr.persistMu.Unlock()
+	mgr.hub.BroadcastAdminEvent(event, task)
 }
 
-// RetryDevice re-triggers distribution to a failed client device
-func (mgr *DistributionManager) RetryDevice(deviceID int) error {
-	mgr.taskMu.Lock()
-	t := mgr.activeTask
-	mgr.taskMu.Unlock()
-
-	if t == nil {
-		return fmt.Errorf("no active task running")
+func (mgr *DistributionManager) GetActiveTaskSnapshot() map[string]interface{} {
+	task := mgr.GetActiveTask()
+	if task == nil {
+		return nil
 	}
-
-	t.mu.Lock()
-	p, ok := t.Progresses[deviceID]
-	if !ok {
-		t.mu.Unlock()
-		return fmt.Errorf("device not part of the active task")
-	}
-
-	if p.Status != "failed" && p.Status != "stalled" && p.Status != "cancelled" {
-		t.mu.Unlock()
-		return fmt.Errorf("device is not in failed state (current status: %s)", p.Status)
-	}
-
-	p.Status = "downloading"
-	p.Error = ""
-	p.Downloaded = 0
-	p.Percentage = 0
-	p.SpeedMbps = 0
-	p.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
-
-	lanIP := t.ServerIP
-	if lanIP == "" {
-		lanIP = getOutboundIP()
-	}
-	senderAddr := net.JoinHostPort(lanIP, "48080")
-
-	startMsg := model.DistributeStartMessage{
-		Type:       "distribute_start",
-		TaskID:     t.TaskID,
-		FileName:   t.ActiveFile,
-		SenderAddr: senderAddr,
-		SaveDir:    t.SaveDir,
-		PostCmd:    t.PostCmd,
-	}
-	t.mu.Unlock()
-
-	msgBytes, _ := json.Marshal(startMsg)
-	msgBytes = append(msgBytes, '\n')
-
-	if !mgr.hub.TrySend(deviceID, msgBytes) {
-		t.mu.Lock()
-		if pp, ok := t.Progresses[deviceID]; ok {
-			pp.Status = "failed"
-			pp.Error = "client offline or send buffer full"
+	task.mu.RLock()
+	defer task.mu.RUnlock()
+	completed, failed := 0, 0
+	var percentage float64
+	for _, progress := range task.Progresses {
+		percentage += progress.Percentage
+		if progress.Status == "completed" {
+			completed++
 		}
-		t.mu.Unlock()
-		return fmt.Errorf("device is offline or busy")
+		if progress.Status == "failed" || progress.Status == "stalled" || progress.Status == "cancelled" {
+			failed++
+		}
 	}
-	mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
+	if len(task.Progresses) > 0 {
+		percentage /= float64(len(task.Progresses))
+	}
+	return map[string]interface{}{"task_id": task.TaskID, "status": task.Status, "active_file": task.ActiveFile, "active_idx": task.ActiveIdx, "files": task.Files, "total": len(task.Progresses), "completed": completed, "failed": failed, "avg_pct": percentage}
+}
+
+func (mgr *DistributionManager) GetUploadedFiles() ([]FileInfo, error) {
+	entries, err := os.ReadDir(mgr.uploadDir)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]FileInfo, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, FileInfo{Name: info.Name(), Size: info.Size(), ModTime: info.ModTime().Format(time.RFC3339)})
+	}
+	return files, nil
+}
+func (mgr *DistributionManager) DeleteFile(name string) error {
+	mgr.fileMu.Lock()
+	defer mgr.fileMu.Unlock()
+	if mgr.IsRunning() {
+		return fmt.Errorf("分发中不可删除文件")
+	}
+	return os.Remove(filepath.Join(mgr.uploadDir, filepath.Base(name)))
+}
+func (mgr *DistributionManager) ClearAllFiles() error {
+	files, err := mgr.GetUploadedFiles()
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if err := mgr.DeleteFile(file.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func (mgr *DistributionManager) StartTask(files []string, saveDir string, targetIDs []int, serverIP, postCmd string) (*DistributeTask, error) {
+	mgr.fileMu.Lock()
+	defer mgr.fileMu.Unlock()
+	mgr.taskMu.Lock()
+	defer mgr.taskMu.Unlock()
+	if mgr.activeTask != nil {
+		mgr.activeTask.mu.RLock()
+		busy := mgr.activeTask.Status == "running"
+		if mgr.activeTask.done != nil {
+			select {
+			case <-mgr.activeTask.done:
+			default:
+				busy = true
+			}
+		}
+		mgr.activeTask.mu.RUnlock()
+		if busy {
+			return nil, fmt.Errorf("已有分发任务正在运行")
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("请选择文件")
+	}
+	if len(targetIDs) == 0 {
+		if mgr.targetLookup != nil {
+			targetIDs = mgr.targetLookup()
+		} else {
+			targetIDs = mgr.hub.OnlineIDs()
+		}
+	}
+	if len(targetIDs) == 0 {
+		return nil, fmt.Errorf("没有可分发的设备")
+	}
+	if saveDir == "" {
+		saveDir = "./downloads"
+	}
+	task := &DistributeTask{TaskID: uuid.NewString(), SaveDir: saveDir, ServerIP: serverIP, PostCmd: postCmd, Status: "running", Hashes: make(map[string]string), Results: make(map[string]map[int]string), Progresses: make(map[int]*ClientProgress), done: make(chan struct{})}
+	for _, name := range files {
+		if name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+			return nil, fmt.Errorf("非法文件名")
+		}
+		if _, exists := task.Hashes[name]; exists {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(mgr.uploadDir, name))
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("文件不存在或不是常规文件：%s", name)
+		}
+		digest, err := fileSHA256(filepath.Join(mgr.uploadDir, name))
+		if err != nil {
+			return nil, err
+		}
+		task.Files = append(task.Files, name)
+		task.Hashes[name] = digest
+		task.Results[name] = make(map[int]string)
+	}
+	for _, deviceID := range targetIDs {
+		if deviceID <= 0 {
+			return nil, fmt.Errorf("非法设备号")
+		}
+		if _, exists := task.Progresses[deviceID]; exists {
+			continue
+		}
+		hostname := fmt.Sprintf("#%d", deviceID)
+		if mgr.hostnameLookup != nil {
+			if name := mgr.hostnameLookup(deviceID); name != "" {
+				hostname = name
+			}
+		}
+		task.TargetIDs = append(task.TargetIDs, deviceID)
+		task.Progresses[deviceID] = &ClientProgress{DeviceID: deviceID, Hostname: hostname, Status: "idle"}
+	}
+	mgr.activeTask = task
+	mgr.publish(task, "distribute_progress_update")
+	go task.run(mgr)
+	return task, nil
+}
+
+func (mgr *DistributionManager) StopTask() error {
+	task := mgr.GetActiveTask()
+	if task == nil {
+		return fmt.Errorf("没有分发任务")
+	}
+	task.mu.Lock()
+	task.Status = "stopped"
+	for _, progress := range task.Progresses {
+		if progress.Status != "completed" {
+			progress.Status = "cancelled"
+		}
+	}
+	task.mu.Unlock()
+	msg, _ := json.Marshal(model.DistributeCancelMessage{Type: "distribute_cancel", TaskID: task.TaskID})
+	for _, deviceID := range task.TargetIDs {
+		mgr.hub.TrySend(deviceID, append(msg, '\n'))
+	}
+	mgr.publish(task, "distribute_progress_update")
 	return nil
 }
 
-func (t *DistributeTask) run(mgr *DistributionManager) {
+func (mgr *DistributionManager) HandleProgressReport(msg model.DistributeProgressMessage) {
+	task := mgr.GetActiveTask()
+	if task == nil || task.TaskID != msg.TaskID {
+		return
+	}
+	task.mu.Lock()
+	progress := task.Progresses[msg.DeviceID]
+	if task.Status == "running" && progress != nil && msg.TransferID == "" {
+		progress.Status = "failed"
+		progress.Attempts = 3
+		progress.Error = "客户端版本不支持校验回执，请先升级客户端"
+		task.mu.Unlock()
+		mgr.publish(task, "distribute_progress_update")
+		return
+	}
+	if task.Status != "running" || progress == nil || msg.TransferID != progress.TransferID || progress.Status == "completed" {
+		task.mu.Unlock()
+		return
+	}
+	if msg.Status != "downloading" && msg.Status != "completed" && msg.Status != "failed" && msg.Status != "cancelled" && msg.Status != "verifying" && msg.Status != "executing" {
+		task.mu.Unlock()
+		return
+	}
+	if msg.Status == "completed" && msg.SHA256 != task.Hashes[task.ActiveFile] {
+		msg.Status = "failed"
+		msg.Error = "SHA-256 校验回执不匹配"
+	}
+	if msg.Downloaded > progress.Downloaded || progress.Status != msg.Status {
+		progress.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+	}
+	progress.Downloaded, progress.TotalChunks, progress.Percentage = msg.Downloaded, msg.TotalChunks, msg.Percentage
+	progress.SpeedMbps, progress.Status, progress.Error = msg.SpeedMbps, msg.Status, msg.Error
+	if msg.Status == "completed" {
+		task.Results[task.ActiveFile][msg.DeviceID] = "completed"
+	}
+	task.mu.Unlock()
+	mgr.publish(task, "distribute_progress_update")
+}
+
+func (task *DistributeTask) sendLocked(mgr *DistributionManager, progress *ClientProgress) {
+	progress.Attempts++
+	progress.TransferID = uuid.NewString()
+	progress.Status, progress.Error = "downloading", ""
+	progress.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+	serverIP := task.ServerIP
+	if serverIP == "" {
+		serverIP = getOutboundIP()
+	}
+	postCmd := ""
+	if task.ActiveIdx == len(task.Files)-1 {
+		postCmd = task.PostCmd
+	}
+	msg, _ := json.Marshal(model.DistributeStartMessage{Type: "distribute_start", TaskID: task.TaskID, TransferID: progress.TransferID, SHA256: task.Hashes[task.ActiveFile], FileName: task.ActiveFile, SenderAddr: net.JoinHostPort(serverIP, mgr.transferPort), SaveDir: task.SaveDir, PostCmd: postCmd})
+	if !mgr.hub.TrySend(progress.DeviceID, append(msg, '\n')) {
+		progress.Status = "failed"
+		progress.Error = "设备离线或发送队列已满"
+	}
+}
+
+func (task *DistributeTask) run(mgr *DistributionManager) {
 	defer func() {
-		t.mu.Lock()
-		if t.Status == "running" {
-			t.Status = "completed"
+		task.mu.Lock()
+		if task.activeServer != nil {
+			task.activeServer.Stop()
+			task.activeServer = nil
 		}
-		if t.activeServer != nil {
-			t.activeServer.Stop()
-			t.activeServer = nil
+		if task.Status == "running" {
+			task.Status = "completed"
 		}
-		t.mu.Unlock()
-
-		// Keep the finished task in activeTask so frontend can read final completion progress.
-
-		mgr.hub.BroadcastAdminEvent("distribute_task_finished", t)
+		task.mu.Unlock()
+		mgr.publish(task, "distribute_task_finished")
+		close(task.done)
 	}()
-
-	for idx, file := range t.Files {
-		t.mu.Lock()
-		// If task was stopped, break immediately
-		if t.Status == "stopped" {
-			t.mu.Unlock()
+	for index, name := range task.Files {
+		task.mu.Lock()
+		if task.Status != "running" {
+			task.mu.Unlock()
 			return
 		}
-
-		t.ActiveFile = file
-		t.ActiveIdx = idx
-
-		filePath := filepath.Join(mgr.uploadDir, file)
-		t.activeServer = gosilver.NewServer(":48080", filePath)
-		t.mu.Unlock()
-
-		log.Printf("[dist] starting GoSilver server for %s", file)
-		if err := t.activeServer.Start(); err != nil {
-			log.Printf("[dist] failed to start GoSilver server for %s: %v", file, err)
-			t.mu.Lock()
-			for _, p := range t.Progresses {
-				p.Status = "failed"
-				p.Error = fmt.Sprintf("server start failed: %v", err)
+		task.ActiveFile, task.ActiveIdx = name, index
+		server := gosilver.NewServer(":"+mgr.transferPort, filepath.Join(mgr.uploadDir, name))
+		task.activeServer = server
+		task.mu.Unlock()
+		if err := server.Start(); err != nil {
+			task.mu.Lock()
+			task.Status = "failed"
+			for _, progress := range task.Progresses {
+				progress.Status = "failed"
+				progress.Error = err.Error()
 			}
-			t.mu.Unlock()
-			mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
+			task.mu.Unlock()
 			return
 		}
-
-		t.mu.Lock()
-		lanIP := t.ServerIP
-		if lanIP == "" {
-			lanIP = getOutboundIP()
+		task.mu.Lock()
+		if task.Status != "running" {
+			task.mu.Unlock()
+			return
 		}
-		senderAddr := net.JoinHostPort(lanIP, "48080")
-
-		// Reset progresses of active target devices for the current file
-		nowStr := time.Now().Format("2006-01-02 15:04:05")
-		for _, p := range t.Progresses {
-			p.Downloaded = 0
-			p.TotalChunks = 0
-			p.Percentage = 0
-			p.SpeedMbps = 0
-			p.Status = "downloading"
-			p.Error = ""
-			p.UpdatedAt = nowStr
-		}
-		t.mu.Unlock()
-		mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
-
-		// Notify targets
-		startMsg := model.DistributeStartMessage{
-			Type:       "distribute_start",
-			TaskID:     t.TaskID,
-			FileName:   file,
-			SenderAddr: senderAddr,
-			SaveDir:    t.SaveDir,
-			PostCmd:    t.PostCmd,
-		}
-		msgBytes, _ := json.Marshal(startMsg)
-		msgBytes = append(msgBytes, '\n')
-
-		t.mu.Lock()
-		for id, p := range t.Progresses {
-			if !mgr.hub.TrySend(id, msgBytes) {
-				p.Status = "failed"
-				p.Error = "client offline or send buffer full"
-				p.UpdatedAt = time.Now().Format("2006-01-02 15:04:05")
+		for _, progress := range task.Progresses {
+			progress.Downloaded, progress.Percentage, progress.Attempts = 0, 0, 0
+			if task.Results[name][progress.DeviceID] == "completed" {
+				progress.Status = "completed"
+				progress.Percentage = 100
+				continue
 			}
+			task.sendLocked(mgr, progress)
 		}
-		t.mu.Unlock()
-		mgr.hub.BroadcastAdminEvent("distribute_progress_update", t)
-
-		// Wait loop with per-file timeout and stall detection
-		fileDeadline := time.Now().Add(mgr.fileTimeout)
+		task.mu.Unlock()
+		mgr.publish(task, "distribute_progress_update")
+		deadline := time.Now().Add(mgr.fileTimeout)
 		for {
-			time.Sleep(1 * time.Second)
-
-			t.mu.Lock()
-			isStopped := t.Status == "stopped"
-			if isStopped {
-				t.mu.Unlock()
+			time.Sleep(time.Second)
+			task.mu.Lock()
+			if task.Status != "running" {
+				task.mu.Unlock()
 				return
 			}
-
-			// Mark stalled clients with no progress update
-			now := time.Now()
-			for _, p := range t.Progresses {
-				if p.Status != "downloading" && p.Status != "idle" {
+			complete, exhausted := true, true
+			for _, progress := range task.Progresses {
+				if progress.Status == "completed" {
 					continue
 				}
-				updated, err := time.ParseInLocation("2006-01-02 15:04:05", p.UpdatedAt, time.Local)
-				if err == nil && now.Sub(updated) > mgr.stallTimeout {
-					p.Status = "stalled"
-					p.Error = fmt.Sprintf("无进度超过 %v", mgr.stallTimeout)
+				complete = false
+				updated, _ := time.Parse(time.RFC3339Nano, progress.UpdatedAt)
+				if time.Since(updated) > mgr.stallTimeout {
+					progress.Status = "stalled"
+					progress.Error = "长时间无有效进度；请确认客户端已升级"
+				}
+				if progress.Attempts < 3 && time.Since(updated) >= 10*time.Second && (progress.Status == "failed" || progress.Status == "stalled" || progress.Status == "cancelled") {
+					task.sendLocked(mgr, progress)
+				}
+				if progress.Attempts < 3 || progress.Status == "downloading" || progress.Status == "verifying" || progress.Status == "executing" {
+					exhausted = false
 				}
 			}
-
-			allFinished := true
-			for _, p := range t.Progresses {
-				if p.Status == "downloading" || p.Status == "idle" {
-					allFinished = false
-					break
-				}
-			}
-			timedOut := now.After(fileDeadline)
-			if timedOut && !allFinished {
-				for _, p := range t.Progresses {
-					if p.Status == "downloading" || p.Status == "idle" {
-						p.Status = "failed"
-						p.Error = "file distribution timeout"
+			if !complete && (exhausted || time.Now().After(deadline)) {
+				task.Status = "failed"
+				for _, progress := range task.Progresses {
+					if progress.Status != "completed" {
+						progress.Status = "failed"
+						if progress.Error == "" {
+							progress.Error = "分发超时，未确认送达"
+						}
 					}
 				}
-				allFinished = true
-				log.Printf("[dist] file %s timed out after %v", file, mgr.fileTimeout)
+				task.mu.Unlock()
+				return
 			}
-			t.mu.Unlock()
-
-			if allFinished {
-				log.Printf("[dist] file %s distribution finished", file)
+			task.mu.Unlock()
+			if complete {
 				break
 			}
 		}
-
-		t.mu.Lock()
-		if t.activeServer != nil {
-			t.activeServer.Stop()
-			t.activeServer = nil
-		}
-		t.mu.Unlock()
-
-		time.Sleep(1 * time.Second)
+		server.Stop()
+		task.mu.Lock()
+		task.activeServer = nil
+		task.mu.Unlock()
 	}
+}
+
+func (mgr *DistributionManager) RetryDevice(deviceID int) error {
+	task := mgr.GetActiveTask()
+	if task == nil {
+		return fmt.Errorf("没有分发任务")
+	}
+	task.mu.Lock()
+	if deviceID != 0 && task.Progresses[deviceID] == nil {
+		task.mu.Unlock()
+		return fmt.Errorf("设备不属于此任务")
+	}
+	if task.Status == "running" {
+		progress := task.Progresses[deviceID]
+		if progress == nil || progress.Status == "completed" {
+			task.mu.Unlock()
+			return fmt.Errorf("设备不在待重试列表")
+		}
+		task.sendLocked(mgr, progress)
+		task.mu.Unlock()
+		return nil
+	}
+	if task.done != nil {
+		select {
+		case <-task.done:
+		default:
+			task.mu.Unlock()
+			return fmt.Errorf("上一个任务正在停止，请稍后重试")
+		}
+	}
+	for _, name := range task.Files {
+		digest, err := fileSHA256(filepath.Join(mgr.uploadDir, name))
+		if err != nil || digest != task.Hashes[name] {
+			task.mu.Unlock()
+			return fmt.Errorf("源文件已变更，请新建分发任务")
+		}
+	}
+	task.Status = "running"
+	task.done = make(chan struct{})
+	task.mu.Unlock()
+	go task.run(mgr)
+	return nil
+}
+
+func (mgr *DistributionManager) ResetTask() error {
+	if mgr.IsRunning() {
+		return fmt.Errorf("请先停止正在运行的分发")
+	}
+	mgr.taskMu.Lock()
+	mgr.activeTask = nil
+	mgr.taskMu.Unlock()
+	_ = os.Remove(mgr.statePath())
+	return nil
 }
 
 func getOutboundIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		addrs, err := net.InterfaceAddrs()
-		if err == nil {
-			for _, address := range addrs {
-				if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-					if ipnet.IP.To4() != nil {
-						return ipnet.IP.String()
-					}
-				}
-			}
-		}
-		return "127.0.0.1"
+	if err == nil {
+		defer conn.Close()
+		return conn.LocalAddr().(*net.UDPAddr).IP.String()
 	}
-	defer conn.Close()
-	localAddr := conn.LocalAddr().(*net.UDPAddr)
-	return localAddr.IP.String()
+	addresses, _ := net.InterfaceAddrs()
+	for _, address := range addresses {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+			return ipnet.IP.String()
+		}
+	}
+	return "127.0.0.1"
 }
 
-func (mgr *DistributionManager) HandlePrecheckReport(deviceID int, success bool, errMsg string) {
+func (mgr *DistributionManager) HandlePrecheckReport(deviceID int, success bool, message string) {
 	mgr.taskMu.Lock()
 	session := mgr.activePrecheck
 	mgr.taskMu.Unlock()
-
 	if session == nil {
 		return
 	}
-
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
-
 	if !session.TargetIDs[deviceID] {
 		return
 	}
-
-	session.Results[deviceID] = PrecheckResult{
-		DeviceID: deviceID,
-		Success:  success,
-		Error:    errMsg,
-	}
-
-	// Check if all target IDs have reported
+	session.Results[deviceID] = PrecheckResult{DeviceID: deviceID, Success: success, Error: message}
 	if len(session.Results) == len(session.TargetIDs) {
 		select {
 		case session.Done <- struct{}{}:
@@ -585,129 +589,60 @@ func (mgr *DistributionManager) HandlePrecheckReport(deviceID int, success bool,
 }
 
 func (mgr *DistributionManager) RunPrecheck(serverIP string, targetIDs []int) ([]PrecheckResult, error) {
-	mgr.taskMu.Lock()
-	if mgr.activeTask != nil {
-		mgr.taskMu.Unlock()
-		return nil, fmt.Errorf("another distribution task is already running")
+	if len(targetIDs) == 0 {
+		targetIDs = mgr.hub.OnlineIDs()
 	}
-	if mgr.activePrecheck != nil {
-		mgr.taskMu.Unlock()
-		return nil, fmt.Errorf("another connectivity precheck is already running")
+	if len(targetIDs) == 0 {
+		return nil, fmt.Errorf("没有目标设备")
 	}
-
 	if serverIP == "" {
 		serverIP = getOutboundIP()
 	}
-
-	// Resolve targets
-	var finalTargets []int
-	if len(targetIDs) == 0 {
-		finalTargets = mgr.hub.OnlineIDs()
-	} else {
-		finalTargets = targetIDs
+	session := &PrecheckSession{TargetIDs: make(map[int]bool), Results: make(map[int]PrecheckResult), Done: make(chan struct{}, 1)}
+	for _, deviceID := range targetIDs {
+		session.TargetIDs[deviceID] = true
 	}
-
-	if len(finalTargets) == 0 {
+	mgr.taskMu.Lock()
+	if mgr.activePrecheck != nil {
 		mgr.taskMu.Unlock()
-		return nil, fmt.Errorf("no online devices available to check connectivity")
-	}
-
-	targetMap := make(map[int]bool)
-	for _, id := range finalTargets {
-		targetMap[id] = true
-	}
-
-	session := &PrecheckSession{
-		TargetIDs: targetMap,
-		Results:   make(map[int]PrecheckResult),
-		Done:      make(chan struct{}, 1),
+		return nil, fmt.Errorf("连通性检查正在运行")
 	}
 	mgr.activePrecheck = session
 	mgr.taskMu.Unlock()
-
-	defer func() {
-		mgr.taskMu.Lock()
-		mgr.activePrecheck = nil
-		mgr.taskMu.Unlock()
-	}()
-
-	// Probe listener on an ephemeral port. Binding 48080 (the GoSilver transfer
-	// port) would collide with an in-flight distribution, so the port is chosen
-	// by the OS and sent to the clients.
-	ln, err := net.Listen("tcp", ":0")
+	defer func() { mgr.taskMu.Lock(); mgr.activePrecheck = nil; mgr.taskMu.Unlock() }()
+	listener, err := net.Listen("tcp", ":0")
 	if err != nil {
-		return nil, fmt.Errorf("failed to open connectivity probe port on server: %w", err)
+		return nil, err
 	}
-	defer ln.Close()
-	probePort := ln.Addr().(*net.TCPAddr).Port
-
+	defer listener.Close()
 	go func() {
 		for {
-			conn, err := ln.Accept()
+			conn, err := listener.Accept()
 			if err != nil {
 				return
 			}
 			conn.Close()
 		}
 	}()
-
-	// Send check request to clients
-	precheckMsg := map[string]interface{}{
-		"type":      "distribute_precheck",
-		"server_ip": serverIP,
-		"port":      probePort,
-	}
-	msgBytes, _ := json.Marshal(precheckMsg)
-	msgBytes = append(msgBytes, '\n')
-
-	for _, id := range finalTargets {
-		clientConn := mgr.hub.GetClient(id)
-		if clientConn != nil {
-			clientConn.Send <- msgBytes
-		} else {
-			session.Mu.Lock()
-			session.Results[id] = PrecheckResult{
-				DeviceID: id,
-				Success:  false,
-				Error:    "client offline",
-			}
-			session.Mu.Unlock()
+	message, _ := json.Marshal(map[string]interface{}{"type": "distribute_precheck", "server_ip": serverIP, "port": listener.Addr().(*net.TCPAddr).Port})
+	for _, deviceID := range targetIDs {
+		if !mgr.hub.TrySend(deviceID, append(message, '\n')) {
+			mgr.HandlePrecheckReport(deviceID, false, "设备离线或繁忙")
 		}
 	}
-
-	// Wait for reports or timeout
 	select {
 	case <-session.Done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(5 * time.Second):
 	}
-
 	session.Mu.Lock()
 	defer session.Mu.Unlock()
-
-	// Fill in missing ones as failed (timeout)
-	var finalResults []PrecheckResult
-	for _, id := range finalTargets {
-		res, ok := session.Results[id]
+	results := make([]PrecheckResult, 0, len(session.TargetIDs))
+	for deviceID := range session.TargetIDs {
+		result, ok := session.Results[deviceID]
 		if !ok {
-			res = PrecheckResult{
-				DeviceID: id,
-				Success:  false,
-				Error:    "check timeout (no response)",
-			}
+			result = PrecheckResult{DeviceID: deviceID, Error: "未收到连通性回执"}
 		}
-		finalResults = append(finalResults, res)
+		results = append(results, result)
 	}
-
-	return finalResults, nil
-}
-
-func (mgr *DistributionManager) ResetTask() error {
-	mgr.taskMu.Lock()
-	defer mgr.taskMu.Unlock()
-
-	if mgr.activeTask != nil && mgr.activeTask.Status == "running" {
-		return fmt.Errorf("cannot reset an actively running task")
-	}
-	mgr.activeTask = nil
-	return nil
+	return results, nil
 }

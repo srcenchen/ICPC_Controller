@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -734,15 +736,33 @@ func writeStoredID(id int) {
 
 func getMacAddress() string {
 	ifaces, _ := net.Interfaces()
-	for _, i := range ifaces {
-		if i.Flags&net.FlagLoopback != 0 || i.Flags&net.FlagUp == 0 {
+	sort.Slice(ifaces, func(left, right int) bool { return ifaces[left].Name < ifaces[right].Name })
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		if len(i.HardwareAddr) > 0 {
-			return i.HardwareAddr.String()
+		if _, err := os.Stat("/sys/class/net/" + iface.Name + "/device"); err != nil {
+			continue
+		}
+		if len(iface.HardwareAddr) == 6 {
+			return iface.HardwareAddr.String()
+		}
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback == 0 && iface.Flags&net.FlagUp != 0 && len(iface.HardwareAddr) == 6 && !strings.HasPrefix(iface.Name, "veth") && !strings.HasPrefix(iface.Name, "docker") && !strings.HasPrefix(iface.Name, "br-") {
+			return iface.HardwareAddr.String()
 		}
 	}
 	return ""
+}
+
+func getIdentityKey() string {
+	mac := getMacAddress()
+	hardware, _ := os.ReadFile("/sys/class/dmi/id/product_uuid")
+	if mac == "" {
+		return ""
+	}
+	return fmt.Sprintf("hw:%x", sha256.Sum256([]byte(strings.TrimSpace(strings.ToLower(string(hardware)))+"|"+mac)))
 }
 
 // getLocalIP returns the preferred non-loopback IPv4 address.
@@ -809,7 +829,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 	hostname, _ := os.Hostname()
 	sendJSON(sender, model.RegisterRequest{
 		Type: "register_request", AssignedID: storedID,
-		MacAddress: getMacAddress(), Hostname: hostname,
+		MacAddress: getMacAddress(), Hostname: hostname, IdentityKey: getIdentityKey(),
 	})
 
 	line, err := reader.ReadString('\n')
@@ -1063,7 +1083,10 @@ func connectAndServe(serverAddr string, storedID *int) error {
 			go handleDistributeStart(sender, &msg)
 
 		case "distribute_cancel":
-			go handleDistributeCancel()
+			var message model.DistributeCancelMessage
+			if json.Unmarshal([]byte(line), &message) == nil {
+				go cancelVerifiedDistribution(message.TaskID)
+			}
 
 		case "distribute_precheck":
 			var msg struct {
@@ -1348,10 +1371,20 @@ func startTerminal(sender *safeSender, msg *model.TerminalOpenMessage, mu *sync.
 var (
 	activeDistMu     sync.Mutex
 	activeDistClient *gosilver.Client
+	activeDistCancel context.CancelFunc
+	activeDistTask   string
 )
 
 func handleDistributeStart(sender *safeSender, msg *model.DistributeStartMessage) {
+	if msg.TransferID != "" {
+		startVerifiedDistribution(sender, msg)
+		return
+	}
 	activeDistMu.Lock()
+	activeDistTask = msg.TaskID
+	if activeDistCancel != nil {
+		activeDistCancel()
+	}
 	if activeDistClient != nil {
 		log.Println("[client-dist] stopping previous active download")
 		activeDistClient.CancelDownload()

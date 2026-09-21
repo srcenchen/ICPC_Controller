@@ -10,19 +10,25 @@ import (
 
 // BroadcastRepo handles CRUD for broadcast_pages, broadcast_items, broadcast_fonts, broadcast_config.
 type BroadcastRepo struct {
-	db *sql.DB
+	db     *sql.DB
+	reader broadcastReader
+}
+
+type broadcastReader interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
 }
 
 // NewBroadcastRepo creates a new BroadcastRepo.
 func NewBroadcastRepo(db *sql.DB) *BroadcastRepo {
-	return &BroadcastRepo{db: db}
+	return &BroadcastRepo{db: db, reader: db}
 }
 
 // ---- Config ----
 
 func (r *BroadcastRepo) GetConfig(key string) (string, error) {
 	var v string
-	err := r.db.QueryRow(`SELECT value FROM broadcast_config WHERE key=?`, key).Scan(&v)
+	err := r.reader.QueryRow(`SELECT value FROM broadcast_config WHERE key=?`, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -37,7 +43,7 @@ func (r *BroadcastRepo) SetConfig(key, value string) error {
 // ---- Fonts ----
 
 func (r *BroadcastRepo) ListFonts() ([]model.BroadcastFont, error) {
-	rows, err := r.db.Query(`SELECT id, name, filename, original_name, format, uploaded_at FROM broadcast_fonts ORDER BY id`)
+	rows, err := r.reader.Query(`SELECT id, name, filename, original_name, format, uploaded_at FROM broadcast_fonts ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +92,7 @@ func (r *BroadcastRepo) GetFontByID(id int64) (*model.BroadcastFont, error) {
 // ---- Pages ----
 
 func (r *BroadcastRepo) ListPages(mode string) ([]model.BroadcastPage, error) {
-	rows, err := r.db.Query(`SELECT id, mode, title, sort_order, duration_ms, bg_color, transition FROM broadcast_pages WHERE mode=? ORDER BY sort_order`, mode)
+	rows, err := r.reader.Query(`SELECT id, mode, title, sort_order, duration_ms, bg_color, transition FROM broadcast_pages WHERE mode=? ORDER BY sort_order`, mode)
 	if err != nil {
 		return nil, err
 	}
@@ -117,9 +123,36 @@ func (r *BroadcastRepo) CreatePage(p *model.BroadcastPage) error {
 }
 
 func (r *BroadcastRepo) UpdatePage(p *model.BroadcastPage) error {
-	_, err := r.db.Exec(`UPDATE broadcast_pages SET title=?,sort_order=?,duration_ms=?,bg_color=?,transition=? WHERE id=?`,
-		p.Title, p.SortOrder, p.DurationMs, p.BgColor, p.Transition, p.ID)
+	_, err := r.db.Exec(`UPDATE broadcast_pages SET title=?,duration_ms=?,bg_color=?,transition=? WHERE id=?`,
+		p.Title, p.DurationMs, p.BgColor, p.Transition, p.ID)
 	return err
+}
+
+func (r *BroadcastRepo) DuplicatePage(id int64) (int64, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO broadcast_pages(mode,title,sort_order,duration_ms,bg_color,transition)
+		SELECT mode,title || '（副本）',(SELECT COALESCE(MAX(sort_order),0)+1 FROM broadcast_pages),duration_ms,bg_color,transition FROM broadcast_pages WHERE id=?`, id)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return 0, sql.ErrNoRows
+	}
+	newID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	_, err = tx.Exec(`INSERT INTO broadcast_items(page_id,item_type,content,pos_x,pos_y,width,height,font_size,font_color,font_weight,text_align,bg_color,border_radius,animation,z_index,extra_json)
+		SELECT ?,item_type,content,pos_x,pos_y,width,height,font_size,font_color,font_weight,text_align,bg_color,border_radius,animation,z_index,extra_json FROM broadcast_items WHERE page_id=?`, newID, id)
+	if err != nil {
+		return 0, err
+	}
+	return newID, tx.Commit()
 }
 
 func (r *BroadcastRepo) DeletePage(id int64) error {
@@ -168,7 +201,7 @@ func (r *BroadcastRepo) ListItems(pageID int64) ([]model.BroadcastItem, error) {
 }
 
 func (r *BroadcastRepo) ListAllItemsByMode(mode string) (map[int64][]model.BroadcastItem, error) {
-	rows, err := r.db.Query(`
+	rows, err := r.reader.Query(`
 		SELECT i.id, i.page_id, i.item_type, i.content, i.pos_x, i.pos_y, i.width, i.height,
 		       i.font_size, i.font_color, i.font_weight, i.text_align, i.bg_color, i.border_radius,
 		       i.animation, i.z_index, i.extra_json

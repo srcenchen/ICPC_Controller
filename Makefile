@@ -1,7 +1,7 @@
 GO ?= go
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
-.PHONY: build server client client-linux fmt vet test clean
+.PHONY: build server client client-linux fmt vet test test-p2p clean
 
 build: server client
 
@@ -24,6 +24,9 @@ vet:
 
 test:
 	$(GO) test ./...
+
+test-p2p:
+	cd pkg/go-silver-core && $(GO) test -race ./pkg/... ./internal/...
 
 clean:
 	rm -f server client client-linux

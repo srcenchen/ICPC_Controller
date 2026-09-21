@@ -20,6 +20,7 @@ type ClientConn struct {
 	Conn       net.Conn
 	Send       chan []byte // serialized write channel
 	Hub        *Hub
+	done       chan struct{}
 	// lastSeenUpdated is unix nanos of the last last_seen DB write. The struct
 	// is shared with the hub, so keep the access atomic.
 	lastSeenUpdated atomic.Int64
@@ -98,7 +99,7 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if old, ok := h.clients[client.AssignedID]; ok && old != client {
 				// Replace stale connection: stop its write pump and close TCP.
-				close(old.Send)
+				close(old.done)
 				old.Conn.Close()
 			}
 			h.clients[client.AssignedID] = client
@@ -119,7 +120,7 @@ func (h *Hub) Run() {
 			removed := false
 			if ok && current == client {
 				delete(h.clients, client.AssignedID)
-				close(client.Send)
+				close(client.done)
 				removed = true
 			}
 			h.mu.Unlock()
@@ -155,9 +156,16 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) Register(client *ClientConn) {
+	client.done = make(chan struct{})
 	// Start write pump before registering.
 	go func() {
-		for msg := range client.Send {
+		for {
+			var msg []byte
+			select {
+			case <-client.done:
+				return
+			case msg = <-client.Send:
+			}
 			client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if _, err := client.Conn.Write(msg); err != nil {
 				client.Conn.Close()
@@ -205,8 +213,8 @@ func (h *Hub) OnlineIDs() []int {
 // TrySend attempts a non-blocking send to a client. Returns false if offline or buffer full.
 func (h *Hub) TrySend(assignedID int, data []byte) bool {
 	h.mu.RLock()
+	defer h.mu.RUnlock()
 	client := h.clients[assignedID]
-	h.mu.RUnlock()
 	if client == nil {
 		return false
 	}

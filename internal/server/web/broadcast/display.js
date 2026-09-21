@@ -9,6 +9,7 @@ var BroadcastDisplay = (function() {
   var ws = null;
   var clockTimer = null;
   var fontLoaded = false;
+  var activeFont = null;
   var lockCheckTimer = null;
 
   // Batched countdown cache
@@ -65,6 +66,8 @@ var BroadcastDisplay = (function() {
     if (msg.server_time) serverTimeOffset = Date.now() - new Date(msg.server_time).getTime();
     if (msg.started_at) syncStartedAt = msg.started_at;
     if (msg.type === "pages_updated" && msg.pages) {
+      loadFont();
+      fetchCountdown();
       pages = msg.pages;
       if (pages.length === 0) { showEmpty(); return; }
       // WS active: server controls page. Stay on current or switch if needed.
@@ -96,6 +99,10 @@ var BroadcastDisplay = (function() {
       currentIdx = calcSyncedPageIndex();
       renderCurrentPage();
     }).catch(function(){});
+    fetchCountdown();
+  }
+
+  function fetchCountdown() {
     fetch("/api/broadcast/config/countdown").then(function(r){return r.json()}).then(function(d){
       countdownCache.target = d.target || null;
       if (d.server_time) countdownCache.clientOffset = Date.now() - new Date(d.server_time).getTime();
@@ -142,12 +149,22 @@ var BroadcastDisplay = (function() {
   // ---- Font loading ----
   function loadFont() {
     fetch("/api/broadcast/config").then(function(r){return r.json()}).then(function(cfg){
-      if (!cfg.active_font) return;
+      if (activeFont === (cfg.active_font || '')) return;
+      activeFont = cfg.active_font || '';
+      var existing = document.getElementById('broadcast-font-style');
+      if (!activeFont) {
+        if (existing) existing.remove();
+        fontLoaded = false;
+        document.querySelectorAll('.broadcast-item').forEach(function(element) { element.style.fontFamily = ''; });
+        return;
+      }
       fetch("/api/broadcast/fonts").then(function(r){return r.json()}).then(function(fonts){
+        if (activeFont !== cfg.active_font) return;
         var f = fonts.filter(function(x){return x.filename === cfg.active_font})[0];
         if (!f) return;
         var fmt = f.format === "ttf" ? "truetype" : f.format;
-        var style = document.createElement("style");
+        var style = existing || document.createElement("style");
+        style.id = 'broadcast-font-style';
         style.textContent =
             '@font-face{font-family:"BroadcastFont";src:url("/broadcast/fonts/'+f.filename+'") format("'+fmt+'");' +
             'font-display:swap}';

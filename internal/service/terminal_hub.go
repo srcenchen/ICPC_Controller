@@ -10,8 +10,34 @@ import (
 
 // TerminalSession holds browser WebSocket connections for a terminal session.
 type TerminalSession struct {
-	Conns map[*websocket.Conn]bool
-	Mu    sync.Mutex
+	Conns   map[*websocket.Conn]bool
+	Streams map[chan []byte]bool
+	Mu      sync.Mutex
+}
+
+func (h *TerminalHubManager) SubscribeStream(sessionID string) (<-chan []byte, func()) {
+	h.Mu.Lock()
+	session := h.Sessions[sessionID]
+	if session == nil {
+		session = &TerminalSession{Conns: make(map[*websocket.Conn]bool)}
+		h.Sessions[sessionID] = session
+	}
+	h.Mu.Unlock()
+	stream := make(chan []byte, 128)
+	session.Mu.Lock()
+	if session.Streams == nil {
+		session.Streams = make(map[chan []byte]bool)
+	}
+	session.Streams[stream] = true
+	session.Mu.Unlock()
+	return stream, func() {
+		session.Mu.Lock()
+		if session.Streams[stream] {
+			delete(session.Streams, stream)
+			close(stream)
+		}
+		session.Mu.Unlock()
+	}
 }
 
 // TerminalHubManager manages terminal sessions identified by session ID.
@@ -74,6 +100,14 @@ func (h *TerminalHubManager) Broadcast(sessionID string, data interface{}) {
 
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
+	for stream := range s.Streams {
+		select {
+		case stream <- append([]byte(nil), msg...):
+		default:
+			delete(s.Streams, stream)
+			close(stream)
+		}
+	}
 	for conn := range s.Conns {
 		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
@@ -94,6 +128,10 @@ func (h *TerminalHubManager) Close(sessionID string) {
 
 	if s != nil {
 		s.Mu.Lock()
+		for stream := range s.Streams {
+			delete(s.Streams, stream)
+			close(stream)
+		}
 		for conn := range s.Conns {
 			conn.Close()
 		}

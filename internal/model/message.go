@@ -5,10 +5,11 @@ import "encoding/json"
 // ---- Client -> Server ----
 
 type RegisterRequest struct {
-	Type       string `json:"type"`
-	AssignedID *int   `json:"assigned_id,omitempty"`
-	MacAddress string `json:"mac_address"`
-	Hostname   string `json:"hostname"`
+	IdentityKey string `json:"identity_key,omitempty"`
+	Type        string `json:"type"`
+	AssignedID  *int   `json:"assigned_id,omitempty"`
+	MacAddress  string `json:"mac_address"`
+	Hostname    string `json:"hostname"`
 }
 
 type SystemInfoMessage struct {
@@ -198,6 +199,8 @@ type CommandOutputEvent struct {
 
 // DistributeStartMessage (Server -> Client)
 type DistributeStartMessage struct {
+	TransferID string `json:"transfer_id"`
+	SHA256     string `json:"sha256"`
 	Type       string `json:"type"` // "distribute_start"
 	TaskID     string `json:"task_id"`
 	FileName   string `json:"file_name"`
@@ -214,6 +217,8 @@ type DistributeCancelMessage struct {
 
 // DistributeProgressMessage (Client -> Server)
 type DistributeProgressMessage struct {
+	TransferID  string  `json:"transfer_id"`
+	SHA256      string  `json:"sha256,omitempty"`
 	Type        string  `json:"type"` // "distribute_progress"
 	TaskID      string  `json:"task_id"`
 	DeviceID    int     `json:"device_id"`

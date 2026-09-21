@@ -37,6 +37,8 @@ type CheckinConfig struct {
 // ServerSettings holds mutable server configuration that can be changed via the admin UI.
 // Changes are automatically persisted to the database.
 type ServerSettings struct {
+	deployment           DeploymentConfig
+	Deployment           *DeploymentConfig `json:"deployment,omitempty"`
 	mu                   sync.RWMutex
 	settingsRepo         *data.SettingsRepo
 	HostnamePrefix       string          `json:"hostname_prefix"`
@@ -182,6 +184,7 @@ func NewServerSettings(prefix string, repo *data.SettingsRepo) *ServerSettings {
 	if repo != nil {
 		s.loadFromDB()
 	}
+	s.loadDeployment()
 
 	return s
 }
@@ -334,7 +337,11 @@ func (s *ServerSettings) Snapshot() ServerSettings {
 	copy(presets, s.Presets)
 	rules := make([]NetworkRule, len(s.NetworkRules))
 	copy(rules, s.NetworkRules)
+	deployment := s.deployment
+	deployment.TokenSet = deployment.Token != ""
+	deployment.Token = ""
 	return ServerSettings{
+		Deployment:           &deployment,
 		HostnamePrefix:       s.HostnamePrefix,
 		Presets:              presets,
 		NetworkRules:         rules,

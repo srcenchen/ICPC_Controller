@@ -35,6 +35,9 @@ func NewDB(path string) (*sql.DB, error) {
 // migrate creates tables if they don't exist.
 func migrate(db *sql.DB) error {
 	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS cluster_rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, snapshot TEXT NOT NULL DEFAULT '{}', last_seen TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS cluster_jobs (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', response TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS cluster_receipts (id TEXT PRIMARY KEY, status TEXT NOT NULL, response TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS devices (
 			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
 			assigned_id         INTEGER NOT NULL UNIQUE,
@@ -170,6 +173,7 @@ func migrate(db *sql.DB) error {
 	// the live schema rather than relying on ALTER TABLE error strings.
 	addColumns := []struct{ table, column, def string }{
 		{"devices", "mac_address", "TEXT NOT NULL DEFAULT ''"},
+		{"devices", "identity_key", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "checkin_status", "INTEGER NOT NULL DEFAULT 0"},
 		{"devices", "student_name", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "student_num", "TEXT NOT NULL DEFAULT ''"},
@@ -193,6 +197,7 @@ func migrate(db *sql.DB) error {
 
 	// Indexes that depend on migrated columns.
 	postIndexes := []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_identity ON devices(identity_key) WHERE identity_key != ''`,
 		`CREATE INDEX IF NOT EXISTS idx_devices_checkin_status ON devices(checkin_status)`,
 	}
 	for _, stmt := range postIndexes {

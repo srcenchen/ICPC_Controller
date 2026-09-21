@@ -54,6 +54,7 @@ function loadScreenMonitor() {
 }
 
 function renderScreenPage(settings) {
+    if (currentPage !== "screen") return;
     var enabled = settings.screen_monitor_enabled || false;
 
     var html = 
@@ -273,4 +274,3 @@ function closeLargeScreen(e) {
         overlay.remove();
     }
 }
-

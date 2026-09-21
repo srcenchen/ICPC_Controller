@@ -6,6 +6,7 @@ var adminWS = null;
 var selectedTargets = []; // shared with commands.js — empty = broadcast
 
 var PAGE_TITLES = {
+    rooms: "机房总览",
     dashboard: "仪表盘", devices: "设备管理", screen: "屏幕监控",
     commands: "命令执行", network: "网络控制", distribute: "文件分发",
     power: "电源管理", checkin: "签到管理", broadcast: "赛场大屏",
@@ -43,11 +44,15 @@ $(function() {
 
     // Restore last page from URL hash, or default to dashboard.
     var hash = location.hash.replace("#", "");
-    var validPages = ["dashboard", "devices", "checkin", "commands", "network", "broadcast", "settings", "screen", "distribute", "power"];
+    var validPages = ["rooms", "dashboard", "devices", "checkin", "commands", "network", "broadcast", "settings", "screen", "distribute", "power"];
     var startPage = validPages.indexOf(hash) >= 0 ? hash : "dashboard";
 
     connectAdminWS();
     navigateTo(startPage);
+    window.addEventListener("hashchange", function() {
+        var page = location.hash.slice(1);
+        if (page !== currentPage && PAGE_TITLES[page]) navigateTo(page);
+    });
 
     // Esc closes any open modal overlay.
     $(document).on("keydown", function(e) {
@@ -98,6 +103,12 @@ function timeAgo(iso) {
 
 
 function navigateTo(page) {
+    if (currentPage === "broadcast" && page !== "broadcast" && typeof bcCanLeave === "function" && !bcCanLeave()) return;
+    if (typeof guardCloudPage === "function") page = guardCloudPage(page);
+    if (typeof cancelPendingPageRequests === "function") cancelPendingPageRequests();
+    $("#content").html('<div class="empty-state" role="status">正在加载…</div>');
+    if (page !== "broadcast" && window._bcClockTmr) clearInterval(window._bcClockTmr);
+    $("#content").attr("data-page", page);
     currentPage = page;
     location.hash = page;
     $(".nav-link").removeClass("active");
@@ -113,7 +124,9 @@ function navigateTo(page) {
         }
     }
 
+    if (typeof isCloudAllRooms === 'function' && isCloudAllRooms() && loadCloudPage(page)) return;
     switch (page) {
+        case "rooms": loadRooms(); break;
         case "dashboard": loadDashboard(); break;
         case "devices":   loadDevices(); break;
         case "commands":  loadCommands(); break;
@@ -160,6 +173,7 @@ function connectAdminWS() {
 
 var _deviceEventTimer = null;
 function handleAdminEvent(msg) {
+    if (typeof isCloudAllRooms === 'function' && isCloudAllRooms()) return;
     switch (msg.event) {
         case "device_connected":
         case "device_disconnected":
@@ -241,6 +255,7 @@ function refreshCurrentPage() {
 }
 
 function updateStatusBar() {
+    if (typeof deploymentConfig !== "undefined" && deploymentConfig.mode === "cloud" && !selectedRoom) { refreshRoomsData(); return; }
     $.getJSON("/api/stats", function(stats) {
         $("#online-count").text("在线: " + stats.online_devices);
         $("#total-count").text("总计: " + stats.total_devices);
@@ -268,6 +283,7 @@ function escapeHtml(str) {
 
 function statusLabel(status) {
     var map = {
+        idle: "未运行", downloading: "下载中",
         pending: "等待中",
         dispatched: "已派发",
         running: "运行中",
@@ -276,6 +292,7 @@ function statusLabel(status) {
         timeout: "超时",
         stalled: "卡住",
         cancelled: "已取消"
+        , verifying: "校验中", executing: "后置命令", stopped: "已停止", queued: "等待中转", sent: "已投递", unknown: "待核实"
     };
     return map[status] || status;
 }

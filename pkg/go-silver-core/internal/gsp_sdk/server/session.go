@@ -37,6 +37,7 @@ type Session struct {
 	isMain        bool          // 是否为主发送端
 	done          chan struct{} // 关闭通道
 	uploadSem     chan struct{} // 并发上传限制 (限流信号量)
+	connections   map[net.Conn]bool
 }
 
 func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
@@ -51,6 +52,7 @@ func NewGspSession(addr string, mempool *mempool.MemPool) *Session {
 		memPool:     mempool,
 		done:        make(chan struct{}),
 		uploadSem:   make(chan struct{}, 5), // 限制最大 5 个并发上传
+		connections: make(map[net.Conn]bool),
 	}
 }
 
@@ -73,6 +75,16 @@ func (s *Session) Start() error {
 				slog.Error("与接收端建立连接失败: " + err.Error())
 				return // 出现非正常错误时退出，防止 CPU 空转和 nil 指针崩溃
 			}
+			s.mu.Lock()
+			select {
+			case <-s.done:
+				s.mu.Unlock()
+				conn.Close()
+				return
+			default:
+			}
+			s.connections[conn] = true
+			s.mu.Unlock()
 			go s.handle(conn)
 		}
 	}()
@@ -93,10 +105,15 @@ func (s *Session) Stop() {
 		_ = s.lis.Close()
 		s.lis = nil
 	}
+	for conn := range s.connections {
+		_ = conn.Close()
+	}
 }
 
 // BeSendMain 作为发送主机
 func (s *Session) BeSendMain(f *os.File) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ck := chunk.NewFileChunk(f, s.memPool)
 	nums := ck.GetChunkNum()
 	s.chunkProvider = *ck
@@ -116,6 +133,8 @@ func (s *Session) BeSendMain(f *os.File) error {
 
 // BeSendSub 作为发送从机
 func (s *Session) BeSendSub(f *os.File) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ck := chunk.NewFileChunk(f, s.memPool)
 	s.chunkProvider = *ck
 	return
@@ -159,4 +178,7 @@ func (s *Session) parsePacket(conn net.Conn, packet *gsp.Packet) error {
 // CloseConn 关闭连接
 func (s *Session) CloseConn(conn net.Conn) {
 	_ = conn.Close()
+	s.mu.Lock()
+	delete(s.connections, conn)
+	s.mu.Unlock()
 }

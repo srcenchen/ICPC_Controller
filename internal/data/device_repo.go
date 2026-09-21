@@ -275,7 +275,7 @@ func (r *DeviceRepo) UpdateClientVersion(assignedID int, version string) error {
 // but dropped before sending system_info (hostname 'pending', empty MAC).
 func (r *DeviceRepo) DeleteGhostRows() (int64, error) {
 	res, err := r.db.Exec(
-		`DELETE FROM devices WHERE mac_address='' AND hostname IN ('pending','') AND connected=0`)
+		`DELETE FROM devices WHERE identity_key='' AND mac_address='' AND hostname IN ('pending','') AND connected=0`)
 	if err != nil {
 		return 0, fmt.Errorf("delete ghost rows: %w", err)
 	}

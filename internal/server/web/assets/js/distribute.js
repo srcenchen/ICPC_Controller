@@ -6,6 +6,7 @@ var activeTaskPollInterval = null;
 var postCmdEditor = null;
 
 function loadDistribute() {
+    if (isCloudAllRooms()) { loadCloudPage('distribute'); return; }
     selectedTargets = []; // reset global device selections
     deviceFilter = "";    // reset filter
     selectedFiles = [];   // reset files selection
@@ -19,16 +20,18 @@ function loadDistribute() {
 }
 
 function refreshDistributeData() {
+    if (isCloudAllRooms()) { loadCloudPage('distribute'); return; }
     $.when(
         $.getJSON("/api/distribution/status"),
         $.getJSON("/api/distribution/files"),
         $.getJSON("/api/devices")
     ).done(function(statusResp, filesResp, devicesResp) {
+        if (currentPage !== "distribute") return;
         var activeTask = statusResp[0];
         var files = filesResp[0];
         allDevices = devicesResp[0];
 
-        if (activeTask && (activeTask.status === "running" || activeTask.status === "completed" || activeTask.status === "stopped")) {
+        if (activeTask && ["running", "completed", "stopped", "failed"].indexOf(activeTask.status) >= 0) {
             renderActiveTask(activeTask);
             // Start polling if not already started and task is running
             if (activeTask.status === "running") {
@@ -49,11 +52,13 @@ function refreshDistributeData() {
             renderSetupPage(files, activeTask ? activeTask.suggested_ip : "");
         }
     }).fail(function() {
+        if (currentPage !== "distribute") return;
         $("#content").html('<div class="empty-state">加载分发页面失败，请重试</div>');
     });
 }
 
 function pollTaskStatus() {
+    if (currentPage !== "distribute") { clearInterval(activeTaskPollInterval); activeTaskPollInterval = null; return; }
     $.getJSON("/api/distribution/status", function(task) {
         if (!task) return;
         if (task.status !== "running") {
@@ -71,6 +76,7 @@ function pollTaskStatus() {
 // ---- Setup Page Render (Idle State) ----
 
 function renderSetupPage(files, suggestedIP) {
+    if (currentPage !== "distribute") return;
     files = files || [];
     var fileRows = files.length === 0
         ? '<tr><td colspan="4" class="empty-state">服务器暂无上传文件，请在上方上传</td></tr>'
@@ -290,6 +296,7 @@ function clearAllServerFiles() {
 // ---- Active Task Render (Running State) ----
 
 function renderActiveTask(task) {
+    if (currentPage !== "distribute") return;
     var totalFiles = task.files.length;
     var currentFile = task.active_file;
     var fileIdx = task.active_idx + 1;
@@ -299,6 +306,7 @@ function renderActiveTask(task) {
         actionBtn = '<button class="btn btn-danger btn-sm" onclick="stopFileDistribution()">⏹ 停止分发</button>';
     } else {
         actionBtn = '<button class="btn btn-primary btn-sm" onclick="clearLastDistributionTask()">← 返回配置</button>';
+        if (task.status === "failed" || task.status === "stopped") actionBtn += '<button class="btn btn-warning btn-sm" onclick="retryMissingDistribution()">补传全部缺失文件</button>';
     }
 
     var html = '' +
@@ -309,7 +317,7 @@ function renderActiveTask(task) {
         
         // Progress Card
         '<div class="settings-card" style="margin-bottom:20px;">' +
-            '<h3>正在分发：<code style="background:var(--bg-primary); padding:2px 6px; border-radius:4px; font-size:15px; color:var(--accent);">' + escapeHtml(currentFile) + '</code></h3>' +
+            '<h3>' + statusLabel(task.status) + '：<code style="background:var(--bg-primary); padding:2px 6px; border-radius:4px; font-size:15px; color:var(--accent);">' + escapeHtml(currentFile) + '</code></h3>' +
             '<p class="settings-desc" style="margin-top:6px;">' +
                 '文件序号: ' + fileIdx + ' / ' + totalFiles + ' | ' +
                 '目标保存目录: <code>' + escapeHtml(task.save_dir) + '</code>' +
@@ -425,6 +433,13 @@ function updateActiveTaskUI(task) {
     }).join("");
 
     tbody.html(rowsHtml);
+    var ledger = '<div class="ops-pills">' + task.files.map(function(name) {
+        var receipts = (task.results || {})[name] || {};
+        var confirmed = Object.keys(receipts).filter(function(key) { return receipts[key] === 'completed'; }).length;
+        return '<span class="badge ' + (confirmed === task.target_ids.length ? 'badge-online' : 'badge-offline') + '">' + escapeHtml(name) + ' · 已确认 ' + confirmed + '/' + task.target_ids.length + '</span>';
+    }).join('') + '</div>';
+    if (!$('#dist-file-ledger').length) $('#content .settings-card').first().append('<div id="dist-file-ledger"></div>');
+    $('#dist-file-ledger').html(ledger);
 
     // Overall progress = average percentage across devices (more accurate than completion count)
     var overallPct = totalDevices > 0 ? Math.round(sumPct / totalDevices) : 0;
@@ -460,6 +475,7 @@ function handleDistributeEvent(event, data) {
 // ---- Controller Actions ----
 
 function startFileDistribution() {
+    if (isCloudAllRooms()) { loadCloudPage('distribute'); return; }
     if (selectedFiles.length === 0) {
         alert("请先从文件列表中勾选至少一个要分发的文件！");
         return;

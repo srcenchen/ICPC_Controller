@@ -80,11 +80,14 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 	if err := json.Unmarshal(resp.Payload, &chunkInfo); err != nil {
 		return nil, 0, fmt.Errorf("解析块信息失败: %v", err)
 	}
+	if chunkInfo.Index != i || !chunkInfo.Status {
+		return nil, 0, errors.New("peer returned unavailable or incorrect chunk")
+	}
 	buf2 := g.memPool.Get(_const.ChunkSize)
 	defer g.memPool.Put(buf2)
 	resp, err = g.codec.Decode(conn, *buf2)
 	if err != nil || resp == nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("missing chunk payload: %v", err)
 	}
 	r = resp.Payload
 	curChecksum := crc32.ChecksumIEEE(resp.Payload)
@@ -92,7 +95,9 @@ func (g *GspSdk) GetChunk(addr string, i int64, ck *chunk.FileChunk) (r []byte, 
 		return r, 0, errors.New("接收块失败，Checksum校验失败")
 	}
 	checksum = curChecksum
-	ck.Save(i, resp.Payload)
+	if err = ck.Save(i, resp.Payload); err != nil {
+		return nil, 0, err
+	}
 	ok = true
 	return
 }
@@ -166,6 +171,12 @@ func (g *GspSdk) PeerReg(peerPort int, uuid string) error {
 	if err != nil {
 		return err
 	}
+	g.mu.Lock()
+	if g.control != nil {
+		g.control.Close()
+	}
+	g.control = controlConn
+	g.mu.Unlock()
 	codec := gsp.Codec{}
 	jsonReq, _ := json.Marshal(model.PeerRegReq{
 		Operate: "peerReg",

@@ -18,11 +18,13 @@ function loadNetwork() {
         networkRules = rulesResp[0];
         renderNetworkPage();
     }).fail(function() {
+        if (currentPage !== "network") return;
         $("#content").html('<div class="empty-state">加载失败</div>');
     });
 }
 
 function renderNetworkPage() {
+    if (currentPage !== "network") return;
     var html = '' +
         '<div class="page-header"><h1>网络屏蔽管理</h1></div>' +
 
