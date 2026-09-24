@@ -124,7 +124,18 @@ func (h *PowerHandler) Wake(w http.ResponseWriter, r *http.Request) {
 // sendMagicPacket broadcasts a Wake-on-LAN packet for one MAC address.
 // Requires WoL to be enabled in the machine's BIOS/NIC, and the stored MAC to
 // belong to the wired interface.
+// magicPacketObserver, when set by tests, sees each real send attempt.
+var magicPacketObserver func(mac string, err error)
+
 func sendMagicPacket(mac string) error {
+	err := deliverMagicPacket(mac)
+	if magicPacketObserver != nil {
+		magicPacketObserver(mac, err)
+	}
+	return err
+}
+
+func deliverMagicPacket(mac string) error {
 	hw, err := net.ParseMAC(strings.TrimSpace(mac))
 	if err != nil {
 		return fmt.Errorf("invalid MAC %q: %w", mac, err)
@@ -309,6 +320,7 @@ func (h *PowerHandler) RunSchedule(s data.PowerSchedule) error {
 			wanted[id] = true
 		}
 		sent := 0
+		woken := make([]int, 0, len(devices))
 		for _, d := range devices {
 			if s.TargetType != "all" && !wanted[d.AssignedID] {
 				continue
@@ -316,11 +328,16 @@ func (h *PowerHandler) RunSchedule(s data.PowerSchedule) error {
 			if d.MacAddress == "" {
 				continue
 			}
-			if err := sendMagicPacket(d.MacAddress); err == nil {
-				sent++
+			if err := sendMagicPacket(d.MacAddress); err != nil {
+				continue
 			}
+			sent++
+			woken = append(woken, d.AssignedID)
 		}
 		log.Printf("[power] schedule #%d: %d magic packets sent", s.ID, sent)
+		if s.TargetType == "all" && h.snapshots != nil {
+			h.snapshots.NoteScheduleApplied(s.Action, s.RunAt, woken)
+		}
 		return nil
 
 	case PowerActionShutdown, PowerActionReboot:

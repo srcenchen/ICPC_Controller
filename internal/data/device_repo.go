@@ -228,7 +228,6 @@ func (r *DeviceRepo) GetAllFull() ([]model.Device, error) {
 			&d.FastfetchRaw, &connected, &d.LastSeen, &d.FirstSeen, &d.UpdatedAt,
 			&d.CheckinStatus, &d.StudentName, &d.StudentNum, &d.CheckinTime, &d.CheckoutTime,
 			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
-			&d.CPUPct, &d.MemPct, &d.DiskPct, &d.TempC, &d.Load1, &d.HealthAt, &d.ClientVersion,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan full device: %w", err)

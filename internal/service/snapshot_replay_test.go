@@ -362,6 +362,117 @@ func TestFleetScheduleJoinerIsExecutedOnce(test *testing.T) {
 	}
 }
 
+func TestFleetWakeScheduleMarksOnlyWokenDevices(test *testing.T) {
+	federation, manager, _ := snapshotStack(test)
+	power := NewPowerHandler(federation.devices, manager.dispatcher, data.NewPowerScheduleRepo(federation.db), federation.hub, federation.settings)
+	power.SetSnapshotManager(manager)
+	manager.SetPower(power)
+	mac := map[int]string{1: "aa:bb:cc:dd:ee:11", 2: "aa:bb:cc:dd:ee:22", 9: "aa:bb:cc:dd:ee:99"}
+	if err := federation.devices.Exec(`INSERT INTO devices(assigned_id,hostname,mac_address) VALUES(1,'awake',?)`, mac[1]); err != nil {
+		test.Fatal(err)
+	}
+	registerScripted(test, manager.hub, 1, true)
+	runAt := time.Now().Add(2 * time.Hour).Format(time.RFC3339)
+	response := httptest.NewRecorder()
+	power.Schedules(response, httptest.NewRequest("POST", "/api/power/schedules", bytes.NewReader([]byte(fmt.Sprintf(`{"action":"wol","run_at":%q,"target_type":"all","note":"wake"}`, runAt)))))
+	if response.Code != http.StatusOK {
+		test.Fatalf("schedule: %d %s", response.Code, response.Body.String())
+	}
+	if err := federation.devices.Exec(`INSERT INTO devices(assigned_id,hostname,mac_address) VALUES(2,'joiner',?)`, mac[2]); err != nil {
+		test.Fatal(err)
+	}
+	registerScripted(test, manager.hub, 2, true)
+	manager.ReplayToDevice(1)
+	manager.ReplayToDevice(2)
+	var schedules int
+	var targetType string
+	if err := federation.db.QueryRow(`SELECT COUNT(*), MIN(target_type) FROM power_schedules WHERE status='pending'`).Scan(&schedules, &targetType); err != nil {
+		test.Fatal(err)
+	}
+	if schedules != 1 || targetType != "all" {
+		test.Fatalf("joiner was given a second wake schedule: %d %s", schedules, targetType)
+	}
+	opID := mustOnlyOp(test, manager)
+	if delivered, err := manager.repo.IsDelivered(opID, "device", "2"); err != nil || delivered {
+		test.Fatalf("joiner marked delivered before the wake fired: %v %v", delivered, err)
+	}
+
+	sent := map[string]int{}
+	magicPacketObserver = func(address string, err error) {
+		if err == nil {
+			sent[address]++
+		}
+	}
+	test.Cleanup(func() { magicPacketObserver = nil })
+	list, err := data.NewPowerScheduleRepo(federation.db).List(10)
+	if err != nil || len(list) != 1 {
+		test.Fatalf("schedule row: %+v %v", list, err)
+	}
+	if err := power.RunSchedule(list[0]); err != nil {
+		test.Fatal(err)
+	}
+	if err := data.NewPowerScheduleRepo(federation.db).SetStatus(list[0].ID, data.ScheduleStatusFired, ""); err != nil {
+		test.Fatal(err)
+	}
+	if sent[mac[1]] != 1 || sent[mac[2]] != 1 {
+		test.Fatalf("fleet wake packets = %v", sent)
+	}
+	for _, id := range []string{"1", "2"} {
+		delivered, err := manager.repo.IsDelivered(opID, "device", id)
+		if err != nil || !delivered {
+			test.Fatalf("woken device %s was not marked delivered: %v %v", id, delivered, err)
+		}
+	}
+	if delivered, err := manager.repo.IsDelivered(opID, "device", "9"); err != nil || delivered {
+		test.Fatalf("device absent at fire was marked delivered: %v %v", delivered, err)
+	}
+	manager.ReplayToDevice(1)
+	manager.ReplayToDevice(2)
+	if sent[mac[1]] != 1 || sent[mac[2]] != 1 {
+		test.Fatalf("woken devices received another packet: %v", sent)
+	}
+	// The janitor only fires a schedule once its time has passed. Move the
+	// recorded instant into the past so the next connect takes that branch.
+	ops, err := manager.repo.ListOps(manager.Active().ID)
+	if err != nil || len(ops) != 1 {
+		test.Fatalf("ops: %+v %v", ops, err)
+	}
+	var payload SnapshotPayload
+	if err := json.Unmarshal([]byte(ops[0].Payload), &payload); err != nil {
+		test.Fatal(err)
+	}
+	payload.RunAt = time.Now().Add(-time.Minute).Format(time.RFC3339)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		test.Fatal(err)
+	}
+	if _, err := federation.db.Exec(`UPDATE snapshot_ops SET payload=? WHERE id=?`, string(raw), ops[0].ID); err != nil {
+		test.Fatal(err)
+	}
+	manager.ReplayToDevice(1)
+	manager.ReplayToDevice(2)
+	if sent[mac[1]] != 1 || sent[mac[2]] != 1 {
+		test.Fatalf("past replay woke an already woken device again: %v", sent)
+	}
+
+	manager.hub.SetConnectHook(nil)
+	if err := federation.devices.Exec(`INSERT INTO devices(assigned_id,hostname,mac_address) VALUES(9,'late',?)`, mac[9]); err != nil {
+		test.Fatal(err)
+	}
+	registerScripted(test, manager.hub, 9, true)
+	manager.ReplayToDevice(9)
+	if sent[mac[9]] != 1 {
+		test.Fatalf("absent device catch-up packets = %d", sent[mac[9]])
+	}
+	if delivered, err := manager.repo.IsDelivered(opID, "device", "9"); err != nil || !delivered {
+		test.Fatalf("catch-up wake was not recorded: %v %v", delivered, err)
+	}
+	manager.ReplayToDevice(9)
+	if sent[mac[9]] != 1 {
+		test.Fatalf("absent device was woken twice: %d", sent[mac[9]])
+	}
+}
+
 func (client *scriptedClient) collectCommands(test *testing.T, command string, wait time.Duration) int {
 	test.Helper()
 	deadline := time.After(wait)
