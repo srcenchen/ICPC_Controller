@@ -55,8 +55,9 @@ func (h *NetworkHandler) UpdateRules(w http.ResponseWriter, r *http.Request) {
 
 // ApplyRequest is the JSON body for apply/remove actions.
 type ApplyRequest struct {
-	TargetType string `json:"target_type"`         // "single" or "broadcast"
+	TargetType string `json:"target_type"`         // "single", "list", or "broadcast"
 	TargetID   *int   `json:"target_id,omitempty"` // required for single
+	TargetIDs  []int  `json:"target_ids,omitempty"`
 }
 
 // Apply constructs the mihomo config and dispatches apply commands (POST /api/network/apply).
@@ -66,18 +67,12 @@ func (h *NetworkHandler) Apply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if req.TargetType != "single" && req.TargetType != "broadcast" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type must be 'single' or 'broadcast'"})
-		return
-	}
-	if req.TargetType == "single" && req.TargetID == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id is required for single target"})
-		return
-	}
-
 	command := buildApplyCommand(h.settings.GetNetworkRules())
-
-	cmd := h.dispatch(req.TargetType, req.TargetID, command, "admin@"+getClientIP(r))
+	cmd, status, errText := h.dispatch(req, command, "admin@"+getClientIP(r))
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": errText})
+		return
+	}
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
@@ -88,43 +83,73 @@ func (h *NetworkHandler) Remove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-	if req.TargetType != "single" && req.TargetType != "broadcast" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type must be 'single' or 'broadcast'"})
-		return
-	}
-	if req.TargetType == "single" && req.TargetID == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id is required for single target"})
-		return
-	}
-
 	command := buildRemoveCommand()
-
-	cmd := h.dispatch(req.TargetType, req.TargetID, command, "admin@"+getClientIP(r))
+	cmd, status, errText := h.dispatch(req, command, "admin@"+getClientIP(r))
+	if status != 0 {
+		writeJSON(w, status, map[string]string{"error": errText})
+		return
+	}
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
-func (h *NetworkHandler) dispatch(targetType string, targetID *int, command, executedBy string) *model.CommandLog {
+func (h *NetworkHandler) dispatch(req ApplyRequest, command, executedBy string) (*model.CommandLog, int, string) {
+	if req.TargetType != "single" && req.TargetType != "broadcast" && req.TargetType != "list" {
+		return nil, http.StatusBadRequest, "target_type must be 'single', 'list', or 'broadcast'"
+	}
+	if req.TargetType == "single" && req.TargetID == nil {
+		return nil, http.StatusBadRequest, "target_id is required for single target"
+	}
+	ids := uniqueDeviceIDs(req.TargetIDs)
+	if req.TargetType == "list" && len(ids) == 0 {
+		return nil, http.StatusBadRequest, "target_ids is required for list target"
+	}
 	cmd := &model.CommandLog{
-		TargetType: targetType,
-		TargetID:   targetID,
+		TargetType: req.TargetType,
+		TargetID:   req.TargetID,
 		Command:    command,
 		Status:     model.CommandStatusDispatched,
 		ExecutedBy: executedBy,
 	}
 	if err := h.repo.Create(cmd); err != nil {
-		return cmd
+		return nil, http.StatusInternalServerError, err.Error()
 	}
-	if targetType == "broadcast" && h.snapshots != nil {
-		h.snapshots.RecordLocal("command", "网络规则变更", SnapshotPayload{Command: command})
+	if req.TargetType == "single" {
+		go h.dispatcher.DispatchSingle(cmd)
+		return cmd, 0, ""
 	}
-	go func() {
-		if targetType == "broadcast" {
-			h.dispatcher.DispatchBroadcast(cmd)
-		} else {
-			h.dispatcher.DispatchSingle(cmd)
+	if req.TargetType == "broadcast" {
+		ids = h.hub.ConnectedIDs()
+	}
+	if len(ids) == 0 {
+		cmd.Status = model.CommandStatusFailed
+		cmd.ErrorOutput = "no devices connected"
+		_ = h.repo.UpdateStatus(cmd)
+		if req.TargetType == "broadcast" && h.snapshots != nil {
+			h.snapshots.RecordLocal("command", "网络规则变更", SnapshotPayload{Command: command}, nil)
 		}
-	}()
-	return cmd
+		return cmd, 0, ""
+	}
+	children, err := h.dispatcher.Materialize(cmd, ids)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err.Error()
+	}
+	cmd.Children = children
+	send := func() []int {
+		h.dispatcher.SendPrepared(cmd.ID, children)
+		delivered := make([]int, 0, len(children))
+		for _, child := range children {
+			if child.Status == model.CommandStatusDispatched && child.TargetID != nil {
+				delivered = append(delivered, *child.TargetID)
+			}
+		}
+		return delivered
+	}
+	if req.TargetType == "broadcast" && h.snapshots != nil {
+		h.snapshots.ObserveFanout("command", "网络规则变更", SnapshotPayload{Command: command}, send)
+	} else {
+		send()
+	}
+	return cmd, 0, ""
 }
 
 // buildRemoveCommand constructs the shell command that reconfigures mihomo to allow

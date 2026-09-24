@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+:root {
+  --background: 40 23% 97%;
+  --foreground: 200 18% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 200 18% 12%;
+  --muted: 40 14% 93%;
+  --muted-foreground: 200 8% 38%;
+  --border: 36 12% 86%;
+  --primary: 174 72% 24%;
+  --primary-foreground: 160 40% 98%;
+  --destructive: 4 72% 42%;
+  --destructive-foreground: 0 0% 100%;
+  --ring: 174 72% 24%;
+  --sidebar: 198 22% 11%;
+  --sidebar-foreground: 40 20% 94%;
+  --warning: 28 90% 42%;
+  --ok: 152 55% 32%;
+  --radius: 0.75rem;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --background: 210 16% 8%;
+  --foreground: 40 18% 94%;
+  --card: 210 14% 11%;
+  --card-foreground: 40 18% 94%;
+  --muted: 210 12% 16%;
+  --muted-foreground: 210 8% 70%;
+  --border: 210 10% 20%;
+  --primary: 168 52% 46%;
+  --primary-foreground: 200 24% 8%;
+  --destructive: 0 68% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --ring: 168 52% 46%;
+  --sidebar: 210 18% 6%;
+  --sidebar-foreground: 40 16% 92%;
+  --warning: 32 90% 58%;
+  --ok: 152 46% 52%;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Avenir Next", "Segoe UI", "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "Sarasa Mono SC", "JetBrains Mono", "ui-monospace", monospace;
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-border: hsl(var(--border));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-ring: hsl(var(--ring));
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-warning: hsl(var(--warning));
+  --color-ok: hsl(var(--ok));
+  --radius-lg: var(--radius);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+code, .mono { font-family: var(--font-mono); }
+
+.table-wrap { overflow: auto; border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--card)); }
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data th { text-align: left; font-weight: 600; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); position: sticky; top: 0; }
+table.data th, table.data td { padding: 8px 12px; border-bottom: 1px solid hsl(var(--border)); vertical-align: middle; }
+table.data tr:last-child td { border-bottom: 0; }
+table.data tbody tr:hover { background: hsl(var(--muted) / 0.55); }
+table.data tr.active { background: hsl(var(--primary) / 0.08); }

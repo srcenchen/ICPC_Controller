@@ -106,10 +106,27 @@ func (federation *Federation) PublishBroadcast(writer http.ResponseWriter, reque
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if federation.snapshots != nil && (input.Action == "start" || input.Action == "stop") {
+	if federation.snapshots != nil && (input.Action == "start" || input.Action == "stop") && federation.broadcastTargetsWholeFleet(input.RoomIDs) {
 		federation.snapshots.RecordCloud("broadcast", "广播 "+input.Action+" · "+input.Mode, SnapshotPayload{Rooms: input.RoomIDs, BroadcastJSON: body, BroadcastMode: input.Mode})
 	}
 	writeJSON(writer, 202, map[string]any{"job_ids": jobs, "revision": snapshot.Revision})
+}
+
+func (federation *Federation) broadcastTargetsWholeFleet(roomIDs []string) bool {
+	rooms, err := federation.allRoomIDs()
+	if err != nil || len(rooms) == 0 {
+		return false
+	}
+	selected := make(map[string]bool, len(roomIDs))
+	for _, id := range roomIDs {
+		selected[id] = true
+	}
+	for _, id := range rooms {
+		if !selected[id] {
+			return false
+		}
+	}
+	return true
 }
 
 func (federation *Federation) freezeBroadcastAssets(publication *broadcastPublication) error {

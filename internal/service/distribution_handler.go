@@ -142,7 +142,7 @@ func (h *DistributionHandler) StartTask(w http.ResponseWriter, r *http.Request) 
 		for _, name := range body.Files {
 			files = append(files, RelayFile{Name: name})
 		}
-		h.snapshots.RecordLocal("distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: files, SaveDir: body.SaveDir, PostCmd: body.PostCmd})
+		h.snapshots.RecordLocal("distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: files, SaveDir: body.SaveDir, PostCmd: body.PostCmd}, task.TargetIDs)
 	}
 
 	writeJSON(w, http.StatusOK, task)

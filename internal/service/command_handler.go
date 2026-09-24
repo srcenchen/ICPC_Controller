@@ -28,8 +28,9 @@ func (h *CommandHandler) SetSnapshotManager(snapshots *SnapshotManager) { h.snap
 
 // ExecuteRequest is the JSON body for POST /api/commands.
 type ExecuteRequest struct {
-	TargetType string `json:"target_type"`         // "single" or "broadcast"
+	TargetType string `json:"target_type"`         // "single", "broadcast", or "list"
 	TargetID   *int   `json:"target_id,omitempty"` // required for single
+	TargetIDs  []int  `json:"target_ids,omitempty"`
 	Command    string `json:"command"`
 }
 
@@ -50,12 +51,16 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command too long"})
 		return
 	}
-	if req.TargetType != "single" && req.TargetType != "broadcast" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type must be 'single' or 'broadcast'"})
+	if req.TargetType != "single" && req.TargetType != "broadcast" && req.TargetType != "list" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type must be 'single', 'list', or 'broadcast'"})
 		return
 	}
 	if req.TargetType == "single" && req.TargetID == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id is required for single target"})
+		return
+	}
+	if req.TargetType == "list" && len(uniqueDeviceIDs(req.TargetIDs)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_ids is required for list target"})
 		return
 	}
 
@@ -73,20 +78,60 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if cmd.TargetType == "broadcast" && h.snapshots != nil {
-		h.snapshots.RecordLocal("command", "执行命令："+snippet(cmd.Command, 80), SnapshotPayload{Command: cmd.Command})
+
+	if cmd.TargetType == "single" {
+		go h.dispatcher.DispatchSingle(cmd)
+		writeJSON(w, http.StatusCreated, cmd)
+		return
 	}
 
-	// Dispatch asynchronously.
-	go func() {
+	ids := uniqueDeviceIDs(req.TargetIDs)
+	if cmd.TargetType == "broadcast" {
+		ids = h.hub.ConnectedIDs()
+	}
+	if len(ids) == 0 {
+		cmd.Status = model.CommandStatusFailed
+		cmd.ErrorOutput = "no devices connected"
+		_ = h.repo.UpdateStatus(cmd)
 		if cmd.TargetType == "broadcast" {
-			h.dispatcher.DispatchBroadcast(cmd)
-		} else {
-			h.dispatcher.DispatchSingle(cmd)
+			h.observeCommand(cmd, nil)
 		}
-	}()
-
+		writeJSON(w, http.StatusCreated, cmd)
+		return
+	}
+	children, err := h.dispatcher.Materialize(cmd, ids)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	cmd.Children = children
+	if cmd.TargetType == "broadcast" {
+		h.observeCommand(cmd, children)
+	} else {
+		h.dispatcher.SendPrepared(cmd.ID, children)
+	}
 	writeJSON(w, http.StatusCreated, cmd)
+}
+
+func (h *CommandHandler) observeCommand(cmd *model.CommandLog, children []*model.CommandLog) {
+	send := func() []int {
+		if len(children) == 0 {
+			return nil
+		}
+		h.dispatcher.SendPrepared(cmd.ID, children)
+		delivered := make([]int, 0, len(children))
+		for _, child := range children {
+			if child.Status == model.CommandStatusDispatched && child.TargetID != nil {
+				delivered = append(delivered, *child.TargetID)
+			}
+		}
+		return delivered
+	}
+	if h.snapshots == nil {
+		send()
+		return
+	}
+	h.snapshots.ObserveFanout("command", "执行命令："+snippet(cmd.Command, 80), SnapshotPayload{Command: cmd.Command}, send)
 }
 
 // List returns paginated command history (GET /api/commands?limit=50&offset=0).
@@ -129,8 +174,8 @@ func (h *CommandHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For broadcast parents, populate children.
-	if cmd.TargetType == "broadcast" {
+	// For broadcast and explicit multi-target parents, populate children.
+	if cmd.TargetType == "broadcast" || cmd.TargetType == "list" {
 		children, err := h.repo.GetByParentID(cmd.ID)
 		if err == nil {
 			cmd.Children = children
@@ -192,6 +237,25 @@ func (h *CommandHandler) sendCancelToClient(cmd *model.CommandLog) {
 	case client.Send <- data:
 	default:
 	}
+}
+
+func uniqueDeviceIDs(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, len(ids))
+	out := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+		if len(out) == 4000 {
+			break
+		}
+	}
+	return out
 }
 
 // Presets returns the list of preset commands (GET /api/presets).

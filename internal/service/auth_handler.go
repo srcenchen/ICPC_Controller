@@ -277,7 +277,7 @@ func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
 		path := r.URL.Path
 
 		// Exclude public paths (display screens need read-only broadcast data without admin login)
-		if path == "/login.html" ||
+		if path == "/login.html" || path == "/login" || path == "/favicon.svg" ||
 			path == "/api/auth/login" ||
 			path == "/install.sh" ||
 			path == "/download/client" ||

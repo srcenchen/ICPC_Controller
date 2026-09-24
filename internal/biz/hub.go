@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -207,6 +208,18 @@ func (h *Hub) IsOnline(assignedID int) bool {
 	defer h.mu.RUnlock()
 	_, ok := h.clients[assignedID]
 	return ok
+}
+
+// ConnectedIDs returns the assigned IDs of currently connected clients, sorted.
+func (h *Hub) ConnectedIDs() []int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]int, 0, len(h.clients))
+	for id := range h.clients {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	return ids
 }
 
 func (h *Hub) OnlineCount() int {

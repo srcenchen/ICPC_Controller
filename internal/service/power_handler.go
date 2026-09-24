@@ -102,7 +102,13 @@ func (h *PowerHandler) Wake(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[power] WoL: %d/%d magic packets sent (by %s)", sent, len(results), getClientIP(r))
 	if req.TargetType == "all" && h.snapshots != nil {
-		h.snapshots.RecordLocal("wol", "批量唤醒", SnapshotPayload{})
+		delivered := make([]int, 0, sent)
+		for _, result := range results {
+			if result.Sent {
+				delivered = append(delivered, result.DeviceID)
+			}
+		}
+		h.snapshots.RecordLocal("wol", "批量唤醒", SnapshotPayload{}, delivered)
 	}
 	h.hub.BroadcastAdminEvent("power_wol", map[string]interface{}{
 		"sent":  sent,
@@ -251,7 +257,7 @@ func (h *PowerHandler) createSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[power] scheduled %s at %s (%s) by %s", s.Action, s.RunAt, s.TargetType, s.CreatedBy)
 	if req.TargetType == "all" && h.snapshots != nil {
-		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note})
+		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note}, h.hub.OnlineIDs())
 	}
 	h.hub.BroadcastAdminEvent("power_schedule_created", map[string]interface{}{"id": s.ID})
 	writeJSON(w, http.StatusOK, s)

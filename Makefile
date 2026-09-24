@@ -1,7 +1,10 @@
 GO ?= go
 VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
-.PHONY: build server client client-linux fmt vet test test-p2p clean
+.PHONY: build server client client-linux ui fmt vet test test-p2p clean
+
+ui:
+	cd frontend && npm install && npm run build
 
 build: server client
 

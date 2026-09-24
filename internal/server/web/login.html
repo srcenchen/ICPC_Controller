@@ -1,150 +1,21 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录 - ICPC 远程集控</title>
-    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-    <link rel="stylesheet" href="/assets/css/style.css">
-    <script src="/assets/js/jquery.min.js"></script>
-    <style>
-        body {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            background: radial-gradient(circle at center, #1b263b 0%, #0d1b2a 100%);
-            margin: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            color: #f8f9fa;
-        }
-        .login-card {
-            background: rgba(21, 37, 54, 0.85);
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
-            padding: 40px;
-            width: 100%;
-            max-width: 380px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-            text-align: center;
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-        .login-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.5);
-        }
-        .login-title {
-            font-size: 24px;
-            font-weight: 700;
-            margin-bottom: 8px;
-            color: #fff;
-            letter-spacing: 1px;
-        }
-        .login-subtitle {
-            font-size: 13px;
-            color: #8da2bb;
-            margin-bottom: 32px;
-        }
-        .form-group {
-            text-align: left;
-            margin-bottom: 24px;
-        }
-        .form-group label {
-            display: block;
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: #a9becf;
-        }
-        .form-group input {
-            width: 100%;
-            padding: 12px 16px;
-            background: rgba(13, 27, 42, 0.8);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 6px;
-            color: #fff;
-            font-size: 15px;
-            box-sizing: border-box;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-        .form-group input:focus {
-            outline: none;
-            border-color: #2563eb;
-            box-shadow: 0 0 0 3px rgba(0, 119, 182, 0.25);
-        }
-        .btn-login {
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
-            border: none;
-            border-radius: 6px;
-            color: #fff;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: filter 0.2s, transform 0.1s;
-        }
-        .btn-login:hover {
-            filter: brightness(1.1);
-        }
-        .btn-login:active {
-            transform: scale(0.98);
-        }
-        .error-msg {
-            color: #e63946;
-            font-size: 13px;
-            margin-top: 16px;
-            min-height: 20px;
-            text-align: center;
-        }
-    </style>
-    <link rel="stylesheet" href="/assets/css/operations.css">
-    <script>try { document.documentElement.setAttribute('data-theme', localStorage.getItem('icpc-theme') || 'light'); } catch (error) {}</script>
-</head>
-<body class="login-page">
-    <div class="login-card">
-        <div class="login-title">ICPC 远程集控</div>
-        <div class="login-subtitle">请输入管理员密码以进入后台</div>
-        <form id="login-form">
-            <div class="form-group">
-                <label for="password">密码</label>
-                <input type="password" id="password" placeholder="请输入密码" required autocomplete="current-password">
-            </div>
-            <button type="submit" class="btn-login" id="btn-submit">登 录</button>
-        </form>
-        <div class="error-msg" id="error-box"></div>
-    </div>
-
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f766e" />
+    <title>ICPC 远程集控</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script>
-        $(document).ready(function() {
-            $("#login-form").on("submit", function(e) {
-                e.preventDefault();
-                var pwd = $("#password").val();
-                if (!pwd) return;
-
-                $("#btn-submit").prop("disabled", true).text("正在登录...");
-                $("#error-box").text("");
-
-                $.ajax({
-                    url: "/api/auth/login",
-                    method: "POST",
-                    contentType: "application/json",
-                    data: JSON.stringify({ password: pwd }),
-                    success: function(resp) {
-                        window.location.href = "/";
-                    },
-                    error: function(xhr) {
-                        $("#btn-submit").prop("disabled", false).text("登 录");
-                        var err = "登录失败";
-                        try {
-                            err = JSON.parse(xhr.responseText).error || err;
-                        } catch(e) {}
-                        $("#error-box").text(err);
-                    }
-                });
-            });
-        });
+      try {
+        var t = localStorage.getItem("icpc-theme");
+        if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
     </script>
-</body>
+    <script type="module" crossorigin src="/assets/index-BVGjyOgC.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BsiqU4_9.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

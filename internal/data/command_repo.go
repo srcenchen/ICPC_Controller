@@ -3,6 +3,7 @@ package data
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"ICPCRemoteControl/internal/model"
@@ -37,6 +38,48 @@ func (r *CommandRepo) Create(cmd *model.CommandLog) error {
 	}
 	id, _ := result.LastInsertId()
 	cmd.ID = id
+	return nil
+}
+
+// CreateChildren inserts every child of an existing parent in one statement.
+// SQLite assigns consecutive rowids to a single multi-row INSERT, so the
+// returned IDs match the slice order.
+func (r *CommandRepo) CreateChildren(parentID int64, children []*model.CommandLog) error {
+	if len(children) == 0 {
+		return nil
+	}
+	now := time.Now().Format(time.RFC3339)
+	var query strings.Builder
+	query.WriteString(`INSERT INTO command_log (
+		parent_id, target_type, target_id, command, status, output, error_output,
+		executed_by, created_at, dispatched_at, completed_at
+	) VALUES `)
+	args := make([]any, 0, len(children)*11)
+	for i, child := range children {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteString("(?,?,?,?,?,?,?,?,?,?,?)")
+		child.ParentID = &parentID
+		child.CreatedAt = now
+		if child.TargetType == "" {
+			child.TargetType = "single"
+		}
+		args = append(args, parentID, child.TargetType, child.TargetID, child.Command, child.Status,
+			child.Output, child.ErrorOutput, child.ExecutedBy, now, child.DispatchedAt, child.CompletedAt)
+	}
+	result, err := r.db.Exec(query.String(), args...)
+	if err != nil {
+		return fmt.Errorf("insert command children: %w", err)
+	}
+	last, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("child command ids: %w", err)
+	}
+	first := last - int64(len(children)) + 1
+	for i := range children {
+		children[i].ID = first + int64(i)
+	}
 	return nil
 }
 

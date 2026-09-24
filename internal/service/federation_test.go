@@ -197,8 +197,24 @@ func TestCloudQueuePersistsExplicitTargets(test *testing.T) {
 		test.Fatalf("queue failed: %s", recorder.Body.String())
 	}
 	var count int
-	if err := cloud.db.QueryRow(`SELECT COUNT(*) FROM cluster_jobs WHERE status='queued'`).Scan(&count); err != nil || count != 2 {
-		test.Fatalf("queue not durable: %d %v", count, err)
+	if err := cloud.db.QueryRow(`SELECT COUNT(*) FROM cluster_jobs WHERE status='queued'`).Scan(&count); err != nil || count != 1 {
+		test.Fatalf("expected one batched job per room: %d %v", count, err)
+	}
+	var raw string
+	if err := cloud.db.QueryRow(`SELECT request FROM cluster_jobs`).Scan(&raw); err != nil {
+		test.Fatal(err)
+	}
+	var message FederationMessage
+	if err := json.Unmarshal([]byte(raw), &message); err != nil {
+		test.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(message.Body, &payload); err != nil {
+		test.Fatal(err)
+	}
+	ids, _ := payload["target_ids"].([]any)
+	if payload["target_type"] != "list" || len(ids) != 2 {
+		test.Fatalf("devices were not batched: %+v", payload)
 	}
 }
 
@@ -230,7 +246,8 @@ func TestCloudIndependentPageOperationsKeepRoomTargets(test *testing.T) {
 				test.Fatal(err)
 			}
 			if strings.HasPrefix(operation, "network_") {
-				if message.Path != "/api/commands" || payload["target_type"] != "single" || payload["target_id"] != float64(1) || payload["command"] == "" {
+				ids, _ := payload["target_ids"].([]any)
+				if message.Path != "/api/commands" || payload["target_type"] != "list" || len(ids) != 1 || payload["command"] == "" {
 					test.Fatalf("network target lost: %+v", payload)
 				}
 			} else if payload["target_type"] != "list" || len(payload["device_ids"].([]any)) != 1 {

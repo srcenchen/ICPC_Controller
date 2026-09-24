@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ICPCRemoteControl/internal/biz"
@@ -44,6 +45,7 @@ type SnapshotManager struct {
 	power        *PowerHandler
 	federation   *Federation
 	started      bool
+	mu           sync.Mutex
 }
 
 func NewSnapshotManager(repo *data.SnapshotRepo, settings *ServerSettings, devices *data.DeviceRepo, hub *biz.Hub, dispatcher *biz.CommandDispatcher) *SnapshotManager {
@@ -107,50 +109,77 @@ func (m *SnapshotManager) Active() *data.OperationSnapshot {
 	return snapshot
 }
 
-// RecordLocal records a broadcast operation on a room/local server and marks
-// the currently online devices as already delivered.
-func (m *SnapshotManager) RecordLocal(kind, summary string, payload SnapshotPayload) {
-	if m.repo == nil || m.settings.GetDeployment().Mode == "cloud" {
+// RecordLocal records a whole-fleet operation and marks only the devices that
+// have already received it. Callers must not pass devices whose delivery failed.
+func (m *SnapshotManager) RecordLocal(kind, summary string, payload SnapshotPayload, delivered []int) {
+	if m == nil || m.repo == nil || m.settings.GetDeployment().Mode == "cloud" {
 		return
 	}
-	snapshot, err := m.repo.ActiveSnapshot("local")
-	if err != nil || snapshot == nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	opID := m.recordLocked("local", kind, summary, payload)
+	if opID == 0 {
 		return
 	}
-	payload.Kind = kind
-	raw, _ := json.Marshal(payload)
-	opID, err := m.repo.AddOp(snapshot.ID, kind, string(raw), summary)
-	if err != nil {
-		log.Printf("[snapshot] record local op: %v", err)
-		return
-	}
-	for _, deviceID := range m.hub.OnlineIDs() {
+	for _, deviceID := range delivered {
 		_ = m.repo.MarkDelivered(opID, "device", strconv.Itoa(deviceID))
 	}
+}
+
+// ObserveFanout records a whole-fleet command, runs the send, then marks only
+// the devices whose send succeeded. Replay cannot run in between.
+func (m *SnapshotManager) ObserveFanout(kind, summary string, payload SnapshotPayload, fanout func() []int) {
+	if m == nil || m.repo == nil || m.settings.GetDeployment().Mode == "cloud" {
+		fanout()
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	opID := m.recordLocked("local", kind, summary, payload)
+	for _, deviceID := range fanout() {
+		if opID != 0 {
+			_ = m.repo.MarkDelivered(opID, "device", strconv.Itoa(deviceID))
+		}
+	}
+}
+
+func (m *SnapshotManager) recordLocked(scope, kind, summary string, payload SnapshotPayload) int64 {
+	snapshot, err := m.repo.ActiveSnapshot(scope)
+	if err != nil || snapshot == nil {
+		return 0
+	}
+	payload.Kind = kind
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[snapshot] marshal %s op: %v", scope, err)
+		return 0
+	}
+	opID, err := m.repo.AddOp(snapshot.ID, kind, string(raw), summary)
+	if err != nil {
+		log.Printf("[snapshot] record %s op: %v", scope, err)
+		return 0
+	}
 	m.hub.BroadcastAdminEvent("snapshot_updated", map[string]interface{}{"snapshot_id": snapshot.ID})
+	return opID
 }
 
 // RecordCloud records a broadcast operation issued by the cloud admin and marks
 // the explicitly targeted rooms as already delivered.
 func (m *SnapshotManager) RecordCloud(kind, summary string, payload SnapshotPayload) {
-	if m.repo == nil || m.settings.GetDeployment().Mode != "cloud" {
+	if m == nil || m.repo == nil || m.settings.GetDeployment().Mode != "cloud" {
 		return
 	}
-	snapshot, err := m.repo.ActiveSnapshot("cloud")
-	if err != nil || snapshot == nil {
-		return
-	}
-	payload.Kind = kind
-	raw, _ := json.Marshal(payload)
-	opID, err := m.repo.AddOp(snapshot.ID, kind, string(raw), summary)
-	if err != nil {
-		log.Printf("[snapshot] record cloud op: %v", err)
-		return
-	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	opID := m.recordLocked("cloud", kind, summary, payload)
+	// These rooms already have a durable job from the publish that just
+	// committed. Marking them keeps replay from enqueueing a second copy.
+	// Rooms that did not exist yet are absent here and are caught up on connect.
 	for _, room := range payload.Rooms {
-		_ = m.repo.MarkDelivered(opID, "room", room)
+		if opID != 0 {
+			_ = m.repo.MarkDelivered(opID, "room", room)
+		}
 	}
-	m.hub.BroadcastAdminEvent("snapshot_updated", map[string]interface{}{"snapshot_id": snapshot.ID})
 }
 
 // ReplayToDevice applies every undelivered local snapshot operation to a device
@@ -159,6 +188,8 @@ func (m *SnapshotManager) ReplayToDevice(deviceID int) {
 	if m.repo == nil || !m.hub.IsOnline(deviceID) {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	snapshot, err := m.repo.ActiveSnapshot("local")
 	if err != nil || snapshot == nil {
 		return
@@ -187,6 +218,8 @@ func (m *SnapshotManager) ReplayToRoom(roomID string) {
 	if m.repo == nil || m.federation == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	snapshot, err := m.repo.ActiveSnapshot("cloud")
 	if err != nil || snapshot == nil {
 		return
@@ -265,6 +298,19 @@ func (m *SnapshotManager) executeLocal(op data.SnapshotOp, deviceID int) error {
 }
 
 func (m *SnapshotManager) executeSchedule(payload SnapshotPayload, deviceID int, executedBy string) error {
+	runAt, err := parseScheduleTime(payload.RunAt)
+	if err != nil {
+		return err
+	}
+	if runAt.After(time.Now()) {
+		if m.power == nil {
+			return fmt.Errorf("电源服务不可用")
+		}
+		return m.power.scheduleRepo.Create(&data.PowerSchedule{
+			Action: payload.Action, RunAt: runAt.Format(time.RFC3339),
+			TargetType: "list", TargetIDs: []int{deviceID}, Note: payload.Note, CreatedBy: executedBy,
+		})
+	}
 	if payload.Action == PowerActionWOL {
 		device, err := m.devices.GetByAssignedID(deviceID)
 		if err != nil || device == nil || device.MacAddress == "" {
@@ -276,11 +322,8 @@ func (m *SnapshotManager) executeSchedule(payload SnapshotPayload, deviceID int,
 	if payload.Action == PowerActionReboot {
 		command = rebootCommand
 	}
-	if runAt, err := parseScheduleTime(payload.RunAt); err == nil && runAt.After(time.Now()) && m.power != nil {
-		return m.power.scheduleRepo.Create(&data.PowerSchedule{
-			Action: payload.Action, RunAt: runAt.Format(time.RFC3339),
-			TargetType: "list", TargetIDs: []int{deviceID}, Note: payload.Note, CreatedBy: executedBy,
-		})
+	if payload.Action != PowerActionShutdown && payload.Action != PowerActionReboot {
+		return fmt.Errorf("未知电源操作 %q", payload.Action)
 	}
 	target := deviceID
 	return m.dispatcher.CreateAndDispatch(&model.CommandLog{
@@ -335,6 +378,8 @@ func (m *SnapshotManager) StartSnapshot(w http.ResponseWriter, r *http.Request) 
 }
 
 func (m *SnapshotManager) EndSnapshot(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
@@ -383,6 +428,8 @@ func (m *SnapshotManager) Ops(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *SnapshotManager) DeleteOp(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})

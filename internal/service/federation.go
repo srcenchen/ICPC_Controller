@@ -186,6 +186,7 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 			delete(federation.connections, room.ID)
 		}
 		federation.mu.Unlock()
+		federation.requeueInFlight(room.ID)
 	}()
 	federation.storeSnapshot(room)
 	if federation.snapshots != nil {
@@ -908,15 +909,17 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 				body, _ := json.Marshal(ExecuteRequest{TargetType: "broadcast", Command: request.Command})
 				messages = append(messages, FederationMessage{Path: "/api/commands", Body: body})
 			} else {
-				selected := make(map[int]bool)
+				selected := make([]int, 0, len(targets))
+				seenDevice := make(map[int]bool, len(targets))
 				for _, deviceID := range targets {
-					if deviceID <= 0 || selected[deviceID] {
+					if deviceID <= 0 || seenDevice[deviceID] {
 						continue
 					}
-					selected[deviceID] = true
-					body, _ := json.Marshal(ExecuteRequest{TargetType: "single", TargetID: &deviceID, Command: request.Command})
-					messages = append(messages, FederationMessage{Path: "/api/commands", Body: body})
+					seenDevice[deviceID] = true
+					selected = append(selected, deviceID)
 				}
+				body, _ := json.Marshal(ExecuteRequest{TargetType: "list", TargetIDs: selected, Command: request.Command})
+				messages = append(messages, FederationMessage{Path: "/api/commands", Body: body})
 			}
 		} else if request.Operation == "distribute" {
 			targetIDs := interface{}(targets)
@@ -981,19 +984,55 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 	writeJSON(writer, 202, map[string]interface{}{"job_ids": ids, "message": "已入队；离线机房恢复后投递，执行结果请查看机房命令记录"})
 }
 
+func (federation *Federation) requeueInFlight(roomID string) {
+	_, _ = federation.db.Exec(`UPDATE cluster_jobs SET status='queued', sent_at='' WHERE room_id=? AND status='sent'`, roomID)
+}
+
+// shouldDeliverJob reports whether a stored job should be handed to a room.
+// A job already marked sent is not handed out again while that room is still
+// connected; otherwise a slow broadcast download would run a second time.
+func shouldDeliverJob(status, sentAt string, online bool, now time.Time) bool {
+	switch status {
+	case "queued":
+		return true
+	case "sent":
+		if online {
+			return false
+		}
+		if sentAt == "" {
+			return true
+		}
+		sent, err := time.Parse(time.RFC3339, sentAt)
+		if err != nil {
+			return true
+		}
+		return now.Sub(sent) >= 20*time.Second
+	default:
+		return false
+	}
+}
+
 func (federation *Federation) deliverJobs() {
 	if federation.settings.GetDeployment().Mode != "cloud" {
 		return
 	}
-	rows, err := federation.db.Query(`SELECT id,room_id,request FROM cluster_jobs WHERE status IN ('queued','sent') AND (sent_at='' OR sent_at<?) ORDER BY created_at LIMIT 100`, time.Now().Add(-20*time.Second).UTC().Format(time.RFC3339))
+	rows, err := federation.db.Query(`SELECT id,room_id,request,status,sent_at FROM cluster_jobs WHERE status IN ('queued','sent') ORDER BY created_at LIMIT 100`)
 	if err != nil {
 		return
 	}
 	type queued struct{ id, room, raw string }
 	var jobs []queued
+	now := time.Now()
 	for rows.Next() {
 		var job queued
-		if rows.Scan(&job.id, &job.room, &job.raw) == nil {
+		var status, sentAt string
+		if rows.Scan(&job.id, &job.room, &job.raw, &status, &sentAt) != nil {
+			continue
+		}
+		federation.mu.Lock()
+		_, online := federation.connections[job.room]
+		federation.mu.Unlock()
+		if shouldDeliverJob(status, sentAt, online, now) {
 			jobs = append(jobs, job)
 		}
 	}
@@ -1011,7 +1050,9 @@ func (federation *Federation) deliverJobs() {
 		}
 		_, err := federation.db.Exec(`UPDATE cluster_jobs SET status='sent',sent_at=? WHERE id=? AND status IN ('queued','sent')`, time.Now().UTC().Format(time.RFC3339), job.id)
 		if err == nil {
-			_ = connection.send(request)
+			if sendErr := connection.send(request); sendErr != nil {
+				_, _ = federation.db.Exec(`UPDATE cluster_jobs SET status='queued', sent_at='' WHERE id=? AND status='sent'`, job.id)
+			}
 		}
 	}
 }
