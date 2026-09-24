@@ -1016,7 +1016,9 @@ func (federation *Federation) deliverJobs() {
 	if federation.settings.GetDeployment().Mode != "cloud" {
 		return
 	}
-	rows, err := federation.db.Query(`SELECT id,room_id,request,status,sent_at FROM cluster_jobs WHERE status IN ('queued','sent') ORDER BY created_at LIMIT 100`)
+	rows, err := federation.db.Query(`SELECT id,room_id,request,status,sent_at FROM cluster_jobs
+		WHERE status='queued' OR (status='sent' AND (sent_at='' OR sent_at<?))
+		ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, created_at LIMIT 100`, time.Now().Add(-20*time.Second).UTC().Format(time.RFC3339))
 	if err != nil {
 		return
 	}

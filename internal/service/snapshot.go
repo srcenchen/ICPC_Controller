@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,6 +16,10 @@ import (
 	"ICPCRemoteControl/internal/data"
 	"ICPCRemoteControl/internal/model"
 )
+
+// errSnapshotDeferred means the operation is still covered by something that
+// has not happened yet. The device must not be marked delivered.
+var errSnapshotDeferred = errors.New("snapshot operation not applied yet")
 
 // SnapshotPayload is the replayable description of a broadcast operation.
 // It is deliberately transport agnostic so the same record can be replayed on
@@ -204,7 +209,9 @@ func (m *SnapshotManager) ReplayToDevice(deviceID int) {
 			continue
 		}
 		if err := m.executeLocal(op, deviceID); err != nil {
-			log.Printf("[snapshot] replay op %d to device %d: %v", op.ID, deviceID, err)
+			if !errors.Is(err, errSnapshotDeferred) {
+				log.Printf("[snapshot] replay op %d to device %d: %v", op.ID, deviceID, err)
+			}
 			continue
 		}
 		_ = m.repo.MarkDelivered(op.ID, "device", strconv.Itoa(deviceID))
@@ -306,6 +313,13 @@ func (m *SnapshotManager) executeSchedule(payload SnapshotPayload, deviceID int,
 		if m.power == nil {
 			return fmt.Errorf("电源服务不可用")
 		}
+		covered, err := m.power.scheduleRepo.HasPendingFleet(payload.Action, runAt)
+		if err != nil {
+			return err
+		}
+		if covered {
+			return errSnapshotDeferred
+		}
 		return m.power.scheduleRepo.Create(&data.PowerSchedule{
 			Action: payload.Action, RunAt: runAt.Format(time.RFC3339),
 			TargetType: "list", TargetIDs: []int{deviceID}, Note: payload.Note, CreatedBy: executedBy,
@@ -330,6 +344,44 @@ func (m *SnapshotManager) executeSchedule(payload SnapshotPayload, deviceID int,
 		TargetType: "single", TargetID: &target, Command: command,
 		Status: model.CommandStatusPending, ExecutedBy: executedBy,
 	})
+}
+
+// NoteScheduleApplied marks devices that just received a fired fleet schedule.
+// Devices that were offline stay unmarked so a later connect can catch up once.
+func (m *SnapshotManager) NoteScheduleApplied(action, runAt string, deviceIDs []int) {
+	if m == nil || m.repo == nil || m.settings.GetDeployment().Mode == "cloud" || len(deviceIDs) == 0 {
+		return
+	}
+	when, err := parseScheduleTime(runAt)
+	if err != nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snapshot, err := m.repo.ActiveSnapshot("local")
+	if err != nil || snapshot == nil {
+		return
+	}
+	ops, err := m.repo.ListOps(snapshot.ID)
+	if err != nil {
+		return
+	}
+	for _, op := range ops {
+		if op.Kind != "schedule" {
+			continue
+		}
+		var payload SnapshotPayload
+		if json.Unmarshal([]byte(op.Payload), &payload) != nil || payload.Action != action {
+			continue
+		}
+		opWhen, err := parseScheduleTime(payload.RunAt)
+		if err != nil || !opWhen.Equal(when) {
+			continue
+		}
+		for _, deviceID := range deviceIDs {
+			_ = m.repo.MarkDelivered(op.ID, "device", strconv.Itoa(deviceID))
+		}
+	}
 }
 
 // ---- HTTP API ----

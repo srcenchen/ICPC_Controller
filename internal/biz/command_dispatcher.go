@@ -66,6 +66,23 @@ func (d *CommandDispatcher) DispatchBroadcast(parentCmd *model.CommandLog) error
 	return nil
 }
 
+// AppliedDeviceIDs returns devices that accepted the broadcast. Failures stay
+// out so a later reconnect can still catch up.
+func (d *CommandDispatcher) AppliedDeviceIDs(parentID int64) []int {
+	children, err := d.commandRepo.GetByParentID(parentID)
+	if err != nil {
+		return nil
+	}
+	ids := make([]int, 0, len(children))
+	for _, child := range children {
+		if child.TargetID == nil || child.Status == model.CommandStatusFailed || child.Status == model.CommandStatusTimeout {
+			continue
+		}
+		ids = append(ids, *child.TargetID)
+	}
+	return ids
+}
+
 // Materialize writes one child row per device. Connected devices are stored as
 // already dispatched so the send loop does not rewrite each row.
 func (d *CommandDispatcher) Materialize(parent *model.CommandLog, ids []int) ([]*model.CommandLog, error) {

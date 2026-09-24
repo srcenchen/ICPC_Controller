@@ -257,7 +257,10 @@ func (h *PowerHandler) createSchedule(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[power] scheduled %s at %s (%s) by %s", s.Action, s.RunAt, s.TargetType, s.CreatedBy)
 	if req.TargetType == "all" && h.snapshots != nil {
-		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note}, h.hub.OnlineIDs())
+		// Nobody has received this yet. Marking the currently online machines
+		// would both skip their catch-up if they are offline at fire time and
+		// make a later joiner look like it needs its own copy.
+		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note}, nil)
 	}
 	h.hub.BroadcastAdminEvent("power_schedule_created", map[string]interface{}{"id": s.ID})
 	writeJSON(w, http.StatusOK, s)
@@ -335,6 +338,9 @@ func (h *PowerHandler) RunSchedule(s data.PowerSchedule) error {
 			}
 			if err := h.dispatcher.CreateAndDispatch(parent); err != nil {
 				return err
+			}
+			if h.snapshots != nil {
+				h.snapshots.NoteScheduleApplied(s.Action, s.RunAt, h.dispatcher.AppliedDeviceIDs(parent.ID))
 			}
 			return nil
 		}

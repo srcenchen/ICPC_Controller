@@ -4,14 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/data"
+
+	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/model"
 	"github.com/google/uuid"
 )
@@ -306,6 +308,73 @@ func TestFleetBroadcastReplaysOnceToANewRoom(test *testing.T) {
 	}
 	if original != 1 {
 		test.Fatalf("original room was replayed again: %d", original)
+	}
+}
+
+func TestFleetScheduleJoinerIsExecutedOnce(test *testing.T) {
+	federation, manager, _ := snapshotStack(test)
+	power := NewPowerHandler(federation.devices, manager.dispatcher, data.NewPowerScheduleRepo(federation.db), federation.hub, federation.settings)
+	power.SetSnapshotManager(manager)
+	manager.SetPower(power)
+	first := registerScripted(test, manager.hub, 1, true)
+	runAt := time.Now().Add(2 * time.Hour).Format(time.RFC3339)
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/power/schedules", bytes.NewReader([]byte(fmt.Sprintf(`{"action":"shutdown","run_at":%q,"target_type":"all","note":"end"}`, runAt))))
+	power.Schedules(response, request)
+	if response.Code != http.StatusOK {
+		test.Fatalf("schedule: %d %s", response.Code, response.Body.String())
+	}
+	second := registerScripted(test, manager.hub, 2, true)
+	manager.ReplayToDevice(1)
+	manager.ReplayToDevice(2)
+	var schedules int
+	var targetType string
+	if err := federation.db.QueryRow(`SELECT COUNT(*), MIN(target_type) FROM power_schedules WHERE status='pending'`).Scan(&schedules, &targetType); err != nil {
+		test.Fatal(err)
+	}
+	if schedules != 1 || targetType != "all" {
+		test.Fatalf("joiner was given a second schedule: %d %s", schedules, targetType)
+	}
+	delivered, err := manager.repo.IsDelivered(mustOnlyOp(test, manager), "device", "2")
+	if err != nil || delivered {
+		test.Fatalf("joiner marked delivered before the schedule fired: %v %v", delivered, err)
+	}
+	list, err := data.NewPowerScheduleRepo(federation.db).List(10)
+	if err != nil || len(list) != 1 {
+		test.Fatalf("schedule row: %+v %v", list, err)
+	}
+	if err := power.RunSchedule(list[0]); err != nil {
+		test.Fatal(err)
+	}
+	if got := first.collectCommands(test, "shutdown now", time.Second); got != 1 {
+		test.Fatalf("device online at creation received shutdown %d times", got)
+	}
+	if got := second.collectCommands(test, "shutdown now", time.Second); got != 1 {
+		test.Fatalf("joiner received shutdown %d times", got)
+	}
+	manager.ReplayToDevice(1)
+	manager.ReplayToDevice(2)
+	if got := first.collectCommands(test, "shutdown now", 200*time.Millisecond) + second.collectCommands(test, "shutdown now", 200*time.Millisecond); got != 0 {
+		test.Fatalf("schedule ran again after it was applied: %d", got)
+	}
+	if err := federation.db.QueryRow(`SELECT COUNT(*) FROM power_schedules`).Scan(&schedules); err != nil || schedules != 1 {
+		test.Fatalf("replay inserted another schedule row: %d %v", schedules, err)
+	}
+}
+
+func (client *scriptedClient) collectCommands(test *testing.T, command string, wait time.Duration) int {
+	test.Helper()
+	deadline := time.After(wait)
+	count := 0
+	for {
+		select {
+		case line := <-client.lines:
+			if bytes.Contains([]byte(line), []byte(`"command":"`+command+`"`)) {
+				count++
+			}
+		case <-deadline:
+			return count
+		}
 	}
 }
 

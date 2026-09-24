@@ -74,6 +74,27 @@ func (r *PowerScheduleRepo) List(limit int) ([]PowerSchedule, error) {
 	return scanSchedules(rows)
 }
 
+// HasPendingFleet reports whether a not-yet-fired all-device schedule already
+// covers this action at this instant. A joiner must not get a second row.
+func (r *PowerScheduleRepo) HasPendingFleet(action string, runAt time.Time) (bool, error) {
+	rows, err := r.db.Query(`SELECT run_at FROM power_schedules WHERE status=? AND target_type='all' AND action=?`, ScheduleStatusPending, action)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		stored, err := time.Parse(time.RFC3339, raw)
+		if err == nil && stored.Equal(runAt) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // DuePending returns pending schedules whose run_at has passed.
 func (r *PowerScheduleRepo) DuePending(now time.Time) ([]PowerSchedule, error) {
 	rows, err := r.db.Query(
