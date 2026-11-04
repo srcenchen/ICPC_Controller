@@ -44,7 +44,7 @@ const (
 //	go build -ldflags "-X main.clientVersion=$(git rev-parse --short HEAD)" ./cmd/client
 var clientVersion = "dev"
 
-//go:embed checkin_page.html
+//go:embed checkin_page.html judge_status.html
 var checkinPageFS embed.FS
 
 var (
@@ -188,7 +188,9 @@ func main() {
 
 func startCheckinServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", serveCheckinPage)
+	mux.HandleFunc("GET /{$}", serveJudgeStatus)
+	mux.HandleFunc("GET /legacy-checkin", serveCheckinPage)
+	mux.HandleFunc("/api/judge-proof", handleJudgeProof)
 	mux.HandleFunc("GET /api/info", handleCheckinInfo)
 	mux.HandleFunc("POST /api/checkin", handleCheckinSubmit)
 	mux.HandleFunc("POST /api/checkout", handleCheckoutSubmit)
@@ -1024,6 +1026,12 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				}
 			} else {
 				log.Printf("[client] no active broadcast state on startup")
+			}
+
+		case "judge_presence_response":
+			var response model.JudgePresenceResponse
+			if err := json.Unmarshal([]byte(line), &response); err == nil {
+				deliverJudgeProof(sender, response)
 			}
 
 		case "checkin_config":

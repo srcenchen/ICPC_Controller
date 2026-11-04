@@ -126,3 +126,20 @@ make test-p2p
 回归测试覆盖并发编号、镜像复制编号、旧身份迁移、两机房同号设备隔离、请求去重、屏幕隔离、离线队列、断点缓存、分发误报、损坏分块恢复、多客户端 P2P、广播复制、广播离线发布与素材校验、旧版本防覆盖、局域网地址保留和备份恢复。
 
 内嵌 `pkg/go-silver-core/test/` 中的原有演示测试仍使用旧版接口，直接在该子模块运行 `go test ./...` 会出现既有编译错误；`test-p2p` 运行当前库与新增回归测试，不修改这些旧演示。
+
+## DOMjudge 比赛登录集成
+
+服务端支持 `ICPC_JUDGE_SHARED_SECRET`（至少 32 字符）与 `ICPC_JUDGE_ORIGINS`（逗号分隔的 OJ 完整来源，如 `https://judge.example.edu`）。密钥与 DOMjudge 管理工作台中的集控共享密钥保持一致，不下发到选手客户端。
+
+升级后的客户端在本机 `8090` 端口提供 `/api/judge-proof`，仅接受 loopback 连接和 loopback Host，将 OJ 挑战交给当前集控 TCP 连接验证。集控确认当前注册连接、身份和签名后签发短时证明；登录时自动签到，提交时校验已签到身份。相同身份重复登录保留首次签到时间。
+
+DOMjudge 将登录事件 POST 到集控 `/api/judge/attendance`，采用独立 HMAC 认证和事件编号去重；GET 记录仍要求管理员身份。后台签到页展示最近 500 条比赛登录，包含本机、远程和赦免；机房代理仅开放 GET 读取。客户端默认页面改为自动签到说明，原页面在 `/legacy-checkin`，签退接口与后台操作保留，OJ 退出不会触发签退或关机。
+
+新增验证可运行：
+
+```bash
+go test -race ./internal/judgebridge ./internal/service ./cmd/client -run 'TestSignedClaims|TestJudge' -count=1
+go test ./internal/server -run TestJudgeAttendance -count=1
+```
+
+测试使用临时数据库与内存 TCP 连接，不启动会修改系统的选手客户端主程序。真实选手机还需验证浏览器本地网络权限、部署地址及客户端运行环境。

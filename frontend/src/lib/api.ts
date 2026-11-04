@@ -1,4 +1,4 @@
-const PROXIED = /^(devices|commands|stats|checkin|network|power|presets|distribution|snapshots)(\/|$)|^settings\/(presets|checkin)(\/|$)/;
+const PROXIED = /^(devices|commands|stats|checkin|judge\/attendance|network|power|presets|distribution|snapshots)(\/|$)|^settings\/(presets|checkin)(\/|$)/;
 
 let roomID = "";
 

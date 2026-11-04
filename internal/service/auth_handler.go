@@ -279,6 +279,7 @@ func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
 		// Exclude public paths (display screens need read-only broadcast data without admin login)
 		if path == "/login.html" || path == "/login" || path == "/favicon.svg" ||
 			path == "/api/auth/login" ||
+			(r.Method == http.MethodPost && path == "/api/judge/attendance") || // independently HMAC-authenticated
 			path == "/install.sh" ||
 			path == "/download/client" ||
 			strings.HasPrefix(path, "/assets/") ||

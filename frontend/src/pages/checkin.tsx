@@ -7,10 +7,21 @@ import { Metric } from "@/components/targets";
 import { FleetTable } from "@/components/fleet";
 import { useApp, useDevices } from "@/state";
 
+type JudgeAttendance = { event_id: string; contest_id: number; student_number: string; student_name: string; access_kind: string; node_id: string; device_id: number; logged_in_at: number };
+
 export function Checkin() {
   const app = useApp();
   const { devices, reload } = useDevices();
   const [stats, setStats] = useState({ total: 0, checked_in: 0, checked_out: 0, not_checked: 0 });
+  const [attendance, setAttendance] = useState<JudgeAttendance[]>([]);
+  const [attendanceError, setAttendanceError] = useState("");
+  const loadAttendance = () => api<JudgeAttendance[]>("/api/judge/attendance").then((rows) => { setAttendance(rows); setAttendanceError(""); }).catch(() => setAttendanceError("无法读取比赛签到记录，请确认此集控已升级并启用 OJ 集成。"));
+  useEffect(() => {
+    if (app.cloudAll) return;
+    loadAttendance();
+    const timer = window.setInterval(loadAttendance, 15000);
+    return () => window.clearInterval(timer);
+  }, [app.cloudAll, app.roomID]);
   const [form, setForm] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [num, setNum] = useState("");
@@ -42,7 +53,7 @@ export function Checkin() {
 
   return (
     <div>
-      <PageHeader title="签到" description="选手也可以在选手机本机的签到页自行填写。这里用于补签、签退和换机。">
+      <PageHeader title="签到" description="比赛网站登录后自动签到。这里保留管理员补签、签退和换机操作。">
         <a className="inline-flex h-9 items-center rounded-md border border-border px-3 text-sm" href={apiRoomPath("/api/checkin/export")}>导出 Excel</a>
         <Button variant="outline" onClick={async () => {
           if (!(await app.confirm("清空全部签到记录？"))) return;
@@ -75,6 +86,13 @@ export function Checkin() {
           </tbody>
         </table>
       </div>
+      <section className="mt-6">
+        <div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-semibold">比赛登录签到</h2><p className="text-sm text-muted-foreground">最近 500 条，包含本机验证、远程参赛和赦免登录。</p></div><Button variant="outline" onClick={loadAttendance}>刷新记录</Button></div>
+        {attendanceError ? <p role="alert" className="text-sm text-muted-foreground">{attendanceError}</p> : <div className="table-wrap"><table className="data"><thead><tr><th>比赛</th><th>选手</th><th>学号</th><th>进入方式</th><th>设备</th><th>登录时间</th></tr></thead><tbody>
+          {attendance.map((event) => <tr key={event.event_id}><td>#{event.contest_id}</td><td>{event.student_name}</td><td>{event.student_number}</td><td>{event.access_kind === "local" ? "本机验证" : event.access_kind === "exempt" ? "远程赦免" : "允许远程"}</td><td>{event.device_id ? `#${event.device_id}` : "—"}</td><td>{new Date(event.logged_in_at * 1000).toLocaleString("zh-CN")}</td></tr>)}
+          {!attendance.length && <tr><td colSpan={6}><Empty>暂无比赛登录签到记录</Empty></td></tr>}
+        </tbody></table></div>}
+      </section>
       <Dialog open={form != null} onOpenChange={(open) => { if (!open) setForm(null); }} title={`签到 #${form ?? ""}`}>
         <div className="space-y-3">
           <Input placeholder="姓名" value={name} onChange={(event) => setName(event.target.value)} />

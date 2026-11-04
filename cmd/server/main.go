@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"syscall"
 
 	"ICPCRemoteControl/internal/biz"
@@ -150,6 +151,12 @@ func main() {
 
 	// TCP handler for client connections.
 	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo, eventRepo)
+	judgeBridge, err := service.NewJudgeBridge(db, deviceRepo, hub, settings,
+		os.Getenv("ICPC_JUDGE_SHARED_SECRET"), strings.Split(os.Getenv("ICPC_JUDGE_ORIGINS"), ","))
+	if err != nil {
+		log.Fatalf("failed to initialize OJ integration: %v", err)
+	}
+	tcpHandler.SetJudgeBridge(judgeBridge)
 
 	// Background janitor: log retention, ghost rows, scheduled power actions.
 	janitor := biz.NewJanitor(commandRepo, deviceRepo, eventRepo, scheduleRepo, settings, powerHandler)
@@ -186,6 +193,7 @@ func main() {
 		PowerH:        powerHandler,
 		InstallH:      installHandler,
 		Snapshots:     snapshotMgr,
+		JudgeBridge:   judgeBridge,
 	}
 
 	srv := server.New(cfg)

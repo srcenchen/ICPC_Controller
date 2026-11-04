@@ -29,3 +29,30 @@ func TestServerRegistersFederatedRoutes(test *testing.T) {
 		test.Fatalf("cluster route: %d", response.Code)
 	}
 }
+
+func TestJudgeAttendanceKeepsAdminReadsProtected(test *testing.T) {
+	db, err := data.NewDB(filepath.Join(test.TempDir(), "judge.db"))
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer db.Close()
+	repo := data.NewDeviceRepo(db)
+	hub := biz.NewHub(repo)
+	settings := service.NewServerSettings("test", nil)
+	bridge, err := service.NewJudgeBridge(db, repo, hub, settings, "test-secret-with-at-least-32-bytes", []string{"http://127.0.0.1:8080"})
+	if err != nil {
+		test.Fatal(err)
+	}
+	server := New(Config{Port: "0", JudgeBridge: bridge, AuthH: service.NewAuthHandler(settings)})
+	defer server.stopBackground()
+	for _, entry := range []struct {
+		method string
+		want   int
+	}{{"GET", 401}, {"POST", 400}, {"DELETE", 401}} {
+		response := httptest.NewRecorder()
+		server.httpServer.Handler.ServeHTTP(response, httptest.NewRequest(entry.method, "/api/judge/attendance", nil))
+		if response.Code != entry.want {
+			test.Fatalf("%s attendance: %d want %d", entry.method, response.Code, entry.want)
+		}
+	}
+}

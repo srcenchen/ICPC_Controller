@@ -2,6 +2,24 @@ package model
 
 import "encoding/json"
 
+type JudgePresenceRequest struct {
+	Type          string `json:"type"`
+	CorrelationID string `json:"correlation_id"`
+	Challenge     string `json:"challenge"`
+	Origin        string `json:"origin"`
+}
+
+type JudgePresenceResponse struct {
+	Type          string `json:"type"`
+	CorrelationID string `json:"correlation_id"`
+	Success       bool   `json:"success"`
+	Proof         string `json:"proof,omitempty"`
+	Message       string `json:"message,omitempty"`
+	StudentName   string `json:"student_name,omitempty"`
+	StudentNumber string `json:"student_number,omitempty"`
+	CheckinTime   string `json:"checkin_time,omitempty"`
+}
+
 // ---- Client -> Server ----
 
 type RegisterRequest struct {
