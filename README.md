@@ -9,7 +9,7 @@ make build
 ./server --port 8080 --tcp-port 8081 --p2p-port 48080 --db icpc.db
 ```
 
-本次升级需要同时更新 **server 和 client**。旧客户端可以继续注册，但不支持新的 SHA-256 分发回执；系统会明确报告需要升级，而不会把未校验的下载记为成功。
+文件分发 SHA-256 回执等功能升级需要同时更新 **server 和 client**。旧客户端可以继续注册，但不支持新的 SHA-256 分发回执；系统会明确报告需要升级，而不会把未校验的下载记为成功。仅接入下文的 DOMjudge 本机签到流程时，更新 **client 和 OJ** 即可，集控 server 沿用原版。
 
 升级前请备份原数据库及整个 `data/`。数据库结构会自动迁移。首次升级会更换旧版固定的登录签名密钥，需要重新登录。默认管理员密码仍为 `admin`，部署公网前务必修改。
 
@@ -129,9 +129,9 @@ make test-p2p
 
 ## DOMjudge 本机客户端探测
 
-DOMjudge 在选手浏览器中请求 `http://127.0.0.1:8090/api/judge-proof`。本机接口只接受 loopback 连接与 loopback Host，实时通过原有 `query_checkin_config` 和 `checkin_query` TCP 消息确认客户端仍连接集控，并核对本机签到身份；超时或断连时不会使用缓存放行。
+DOMjudge 在选手浏览器中请求 `http://127.0.0.1:8090/api/judge-proof`。本机接口仅允许 loopback 连接与 loopback Host。登录时请求包含 `purpose: "login"`、`student_name` 和 `student_num`，客户端直接发送原有 `checkin` TCP 消息，集控回复 `success: true` 即返回成功，签到行为与原手动签到一致。
 
-比赛登录时，客户端沿用原有 `checkin` 消息自动签到；已签到且姓名、学号相同则保留原签到时间。提交时只查询连接与身份，不触发签到、签退或关机。集控服务端、数据库和管理前端保持原版，无需新增 API、集控地址配置或共享密钥。DOMjudge 收到的是本机探测回执，依赖选手机客户端与浏览器可信。
+提交时请求使用 `purpose: "submit"`，客户端发送原有 `checkin_query`，集控回复成功即可；不重复签到，不额外比较签到身份或状态。断连、超时或集控返回失败时拒绝，不使用缓存放行。OJ 只检查本机接口返回的 `success: true`，不再检查挑战签名、来源绑定、账号会话绑定、时间戳或一次性凭证。集控服务端、数据库和管理前端保持原版，OJ 与客户端需同步升级。
 
 客户端默认本地页面显示自动签到说明。旧页面在 `/legacy-checkin`，原签退接口与后台操作保留。
 

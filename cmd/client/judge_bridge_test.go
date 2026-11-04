@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net"
 	"net/http/httptest"
@@ -31,17 +30,12 @@ func localProofRequest(method, remote, host, origin, body string) *httptest.Resp
 	return w
 }
 
-func localChallenge(purpose string) judgeChallenge {
-	now := time.Now().Unix()
-	return judgeChallenge{Audience: "cwxu-challenge", Nonce: strings.Repeat("a", 64), SessionHash: strings.Repeat("b", 64),
-		UID: 9, CID: 3, StudentName: "联调选手", StudentNumber: "00123", Origin: "http://oj.example", Purpose: purpose,
-		IssuedAt: now, ExpiresAt: now + 60}
+func localJudgeRequest(purpose string) judgeRequest {
+	return judgeRequest{StudentName: "联调选手", StudentNumber: "00123", Purpose: purpose}
 }
 
-func localChallengeBody(claims judgeChallenge) string {
-	payload, _ := json.Marshal(claims)
-	token := "v1." + base64.RawURLEncoding.EncodeToString(payload) + ".opaque-domserver-signature"
-	body, _ := json.Marshal(map[string]string{"challenge": token})
+func localJudgeBody(request judgeRequest) string {
+	body, _ := json.Marshal(request)
 	return string(body)
 }
 
@@ -61,7 +55,7 @@ func useJudgeSender(t *testing.T) *safeSender {
 	return sender
 }
 
-// Simulate only the original checkin_config/checkin_response messages. No new
+// Simulate only the original checkin/checkin_query operations. No new
 // control-server operation or shared secret is used by this test.
 func originalControlReplies(t *testing.T, sender *safeSender, checked bool, name, number string) func() []string {
 	t.Helper()
@@ -79,10 +73,6 @@ func originalControlReplies(t *testing.T, sender *safeSender, checked bool, name
 			mu.Unlock()
 			checkinMu.Lock()
 			switch message.Type {
-			case "query_checkin_config":
-				if waiter := configWaiters[message.CorrelationID]; waiter != nil {
-					waiter <- model.CheckinConfigMessage{Type: "checkin_config", CorrelationID: message.CorrelationID}
-				}
 			case "checkin", "checkin_query":
 				if message.Type == "checkin" {
 					checked, name, number = true, message.StudentName, message.StudentNum
@@ -114,80 +104,72 @@ func TestJudgeLocalBridgeRestrictsNetworkAndOrigin(t *testing.T) {
 	if w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != "https://oj.example" || w.Header().Get("Access-Control-Allow-Private-Network") != "true" {
 		t.Fatal("preflight failed")
 	}
-	claims := localChallenge("login")
-	for _, mutate := range []func(*judgeChallenge){
-		func(c *judgeChallenge) { c.Origin = "http://wrong.example" },
-		func(c *judgeChallenge) { c.Purpose = "checkout" },
-		func(c *judgeChallenge) { c.Nonce = "bad-nonce" },
-		func(c *judgeChallenge) { c.ExpiresAt = c.IssuedAt + 61 },
-		func(c *judgeChallenge) { c.StudentName = "invalid|name" },
-		func(c *judgeChallenge) { c.UID = 0 },
+	request := localJudgeRequest("login")
+	for _, mutate := range []func(*judgeRequest){
+		func(c *judgeRequest) { c.Purpose = "checkout" },
+		func(c *judgeRequest) { c.StudentNumber = "" },
+		func(c *judgeRequest) { c.StudentName = "" },
 	} {
-		invalid := claims
+		invalid := request
 		mutate(&invalid)
-		if w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localChallengeBody(invalid)); w.Code != 400 {
-			t.Fatalf("bad challenge accepted: %+v (%d)", invalid, w.Code)
+		if w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localJudgeBody(invalid)); w.Code != 400 {
+			t.Fatalf("invalid request accepted: %+v (%d)", invalid, w.Code)
 		}
 	}
 }
 
-func TestJudgeLoginUsesOriginalProtocolAndPreservesSameIdentity(t *testing.T) {
+func TestJudgeLoginSendsOnlyOriginalCheckin(t *testing.T) {
 	sender := useJudgeSender(t)
 	messages := originalControlReplies(t, sender, false, "", "")
-	claims := localChallenge("login")
+	request := localJudgeRequest("login")
 	for i := 0; i < 2; i++ {
-		w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localChallengeBody(claims))
+		w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localJudgeBody(request))
 		if w.Code != 200 {
 			t.Fatalf("login %d: %d %s", i, w.Code, w.Body.String())
 		}
 		var response struct {
-			Success bool   `json:"success"`
-			Proof   string `json:"proof"`
+			Success  bool `json:"success"`
+			DeviceID int  `json:"device_id"`
 		}
-		json.Unmarshal(w.Body.Bytes(), &response)
-		if !response.Success || !strings.HasPrefix(response.Proof, "local.v1.") {
-			t.Fatal("local receipt missing")
+		if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
 		}
-		payload, _ := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(response.Proof, "local.v1."))
-		var fields map[string]any
-		json.Unmarshal(payload, &fields)
-		if fields["connected"] != true || fields["device_id"] != float64(7) || fields["student_number"] != "00123" || fields["nonce"] != claims.Nonce || fields["challenge_hash"] == "" {
-			t.Fatalf("receipt fields: %+v", fields)
+		if !response.Success || response.DeviceID != 7 {
+			t.Fatalf("success result missing: %s", w.Body.String())
 		}
 	}
 	got := strings.Join(messages(), ",")
-	want := "query_checkin_config,checkin_query,checkin,checkin_query,query_checkin_config,checkin_query"
+	want := "checkin,checkin"
 	if got != want {
 		t.Fatalf("original protocol sequence: %s", got)
 	}
 	state.mu.Lock()
 	name, num, when := state.studentName, state.studentNum, state.checkinTime
 	state.mu.Unlock()
-	if name != claims.StudentName || num != claims.StudentNumber || when != "original-checkin-time" {
+	if name != request.StudentName || num != request.StudentNumber || when == "" {
 		t.Fatal("fresh identity was not recorded locally")
 	}
 }
 
-func TestJudgeSubmitChecksFreshIdentityWithoutCheckin(t *testing.T) {
+func TestJudgeSubmitRequiresOnlyServerSuccessWithoutCheckin(t *testing.T) {
 	cases := []struct {
 		label   string
 		checked bool
 		name    string
-		allowed bool
 	}{
-		{"same identity", true, "联调选手", true},
-		{"wrong identity", true, "其他选手", false},
-		{"not checked in", false, "联调选手", false},
+		{"same identity", true, "联调选手"},
+		{"different identity", true, "其他选手"},
+		{"not checked in", false, "联调选手"},
 	}
 	for _, entry := range cases {
 		t.Run(entry.label, func(t *testing.T) {
 			sender := useJudgeSender(t)
 			messages := originalControlReplies(t, sender, entry.checked, entry.name, "00123")
-			w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localChallengeBody(localChallenge("submit")))
-			if (w.Code == 200) != entry.allowed {
+			w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localJudgeBody(localJudgeRequest("submit")))
+			if w.Code != 200 {
 				t.Fatalf("%s: %d %s", entry.label, w.Code, w.Body.String())
 			}
-			if got := strings.Join(messages(), ","); got != "query_checkin_config,checkin_query" {
+			if got := strings.Join(messages(), ","); got != "checkin_query" {
 				t.Fatalf("submit changed check-in: %s", got)
 			}
 		})
@@ -196,15 +178,15 @@ func TestJudgeSubmitChecksFreshIdentityWithoutCheckin(t *testing.T) {
 
 func TestJudgeProbeFailsOnTimeoutAndDisconnectWithoutCachedFallback(t *testing.T) {
 	sender := useJudgeSender(t)
-	claims := localChallenge("submit")
+	request := localJudgeRequest("submit")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := probeJudgeConnection(ctx, sender, 7, claims); err == nil {
+	if _, err := probeJudgeConnection(ctx, sender, 7, request); err == nil {
 		t.Fatal("cached state accepted when server did not respond")
 	}
 	checkinMu.Lock()
-	for id := range configWaiters {
-		if strings.HasPrefix(id, "ojcfg_") {
+	for id := range checkinWaiters {
+		if strings.HasPrefix(id, "ojcheck_") {
 			t.Error("timed-out waiter leaked")
 		}
 	}
@@ -212,7 +194,7 @@ func TestJudgeProbeFailsOnTimeoutAndDisconnectWithoutCachedFallback(t *testing.T
 	state.mu.Lock()
 	state.sender = nil
 	state.mu.Unlock()
-	if w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localChallengeBody(claims)); w.Code != 503 {
+	if w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localJudgeBody(request)); w.Code != 503 {
 		t.Fatal("disconnected device accepted cached registration")
 	}
 }
@@ -223,20 +205,20 @@ func TestJudgeProbeRejectsResponseFromReplacedConnection(t *testing.T) {
 	defer replacement.Close()
 	go func() {
 		raw := <-sender.Chan()
-		var message model.CheckinConfigMessage
+		var message model.CheckinMessage
 		json.Unmarshal(raw, &message)
 		state.mu.Lock()
 		state.sender = replacement
 		state.mu.Unlock()
 		checkinMu.Lock()
-		if waiter := configWaiters[message.CorrelationID]; waiter != nil {
-			waiter <- model.CheckinConfigMessage{Type: "checkin_config", CorrelationID: message.CorrelationID}
+		if waiter := checkinWaiters[message.CorrelationID]; waiter != nil {
+			waiter <- model.CheckinResponseMessage{Type: "checkin_response", CorrelationID: message.CorrelationID, Success: true}
 		}
 		checkinMu.Unlock()
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := probeJudgeConnection(ctx, sender, 7, localChallenge("login")); err == nil {
+	if _, err := probeJudgeConnection(ctx, sender, 7, localJudgeRequest("login")); err == nil {
 		t.Fatal("old connection response accepted after reconnect")
 	}
 }
@@ -331,9 +313,9 @@ func TestJudgeProbeWorksWithUnchangedControlServer(t *testing.T) {
 			checkinMu.Unlock()
 		}
 	}()
-	login := localChallenge("login")
-	request := func(claims judgeChallenge) *httptest.ResponseRecorder {
-		return localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localChallengeBody(claims))
+	login := localJudgeRequest("login")
+	request := func(request judgeRequest) *httptest.ResponseRecorder {
+		return localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "http://oj.example", localJudgeBody(request))
 	}
 	if response := request(login); response.Code != 200 {
 		t.Fatalf("original server login: %d %s", response.Code, response.Body.String())
@@ -347,14 +329,36 @@ func TestJudgeProbeWorksWithUnchangedControlServer(t *testing.T) {
 		t.Fatalf("repeat login: %s", response.Body.String())
 	}
 	device, _ = repo.GetByAssignedID(registered.AssignedID)
-	if device.CheckinTime != "existing-time" {
-		t.Fatal("same identity login overwrote existing checkin time")
+	if device.CheckinTime == "existing-time" {
+		t.Fatal("repeat login did not use the original check-in operation")
 	}
-	if response := request(localChallenge("submit")); response.Code != 200 {
+	if response := request(localJudgeRequest("submit")); response.Code != 200 {
 		t.Fatalf("original server submit: %s", response.Body.String())
 	}
 	repo.Checkout(registered.AssignedID)
-	if response := request(localChallenge("submit")); response.Code == 200 {
-		t.Fatal("original server checked-out state was not observed")
+	if response := request(localJudgeRequest("submit")); response.Code != 200 {
+		t.Fatal("successful original status response was rejected")
+	}
+}
+
+func TestJudgeControlFailureIsReturned(t *testing.T) {
+	for _, purpose := range []string{"login", "submit"} {
+		t.Run(purpose, func(t *testing.T) {
+			sender := useJudgeSender(t)
+			go func() {
+				raw := <-sender.Chan()
+				var message model.CheckinMessage
+				json.Unmarshal(raw, &message)
+				checkinMu.Lock()
+				if waiter := checkinWaiters[message.CorrelationID]; waiter != nil {
+					waiter <- model.CheckinResponseMessage{Success: false, Message: "签到未开放"}
+				}
+				checkinMu.Unlock()
+			}()
+			w := localProofRequest("POST", "127.0.0.1:123", "127.0.0.1:8090", "https://oj.example", localJudgeBody(localJudgeRequest(purpose)))
+			if w.Code != 503 || !strings.Contains(w.Body.String(), "签到未开放") {
+				t.Fatalf("control failure not returned: %d %s", w.Code, w.Body.String())
+			}
+		})
 	}
 }
