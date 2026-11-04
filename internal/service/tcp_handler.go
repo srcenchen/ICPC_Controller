@@ -54,10 +54,7 @@ type TCPHandler struct {
 	settings      *ServerSettings
 	broadcastRepo *data.BroadcastRepo
 	eventRepo     *data.DeviceEventRepo
-	judgeBridge   *JudgeBridge
 }
-
-func (h *TCPHandler) SetJudgeBridge(bridge *JudgeBridge) { h.judgeBridge = bridge }
 
 func NewTCPHandler(hub *biz.Hub, deviceRepo *data.DeviceRepo, commandRepo *data.CommandRepo, idAssigner *biz.IDAssigner, dispatcher *biz.CommandDispatcher, settings *ServerSettings, broadcastRepo *data.BroadcastRepo, eventRepo *data.DeviceEventRepo) *TCPHandler {
 	return &TCPHandler{
@@ -405,26 +402,6 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 			respData = append(respData, '\n')
 			select {
 			case clientConn.Send <- respData:
-			default:
-			}
-
-		case "judge_presence_request":
-			var msg model.JudgePresenceRequest
-			if err := json.Unmarshal([]byte(line), &msg); err != nil || len(msg.CorrelationID) > 128 {
-				continue
-			}
-			proof, proofErr := h.judgeBridge.Proof(clientConn, msg.Challenge, msg.Origin)
-			resp := model.JudgePresenceResponse{Type: "judge_presence_response", CorrelationID: msg.CorrelationID, Success: proofErr == nil, Proof: proof}
-			if proofErr != nil {
-				resp.Message = proofErr.Error()
-			} else if device, err := h.deviceRepo.GetByAssignedID(assignedID); err == nil {
-				resp.StudentName = device.StudentName
-				resp.StudentNumber = device.StudentNum
-				resp.CheckinTime = device.CheckinTime
-			}
-			encoded, _ := json.Marshal(resp)
-			select {
-			case clientConn.Send <- append(encoded, '\n'):
 			default:
 			}
 

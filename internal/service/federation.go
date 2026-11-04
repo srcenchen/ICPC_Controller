@@ -347,7 +347,7 @@ func allowedRelayRequest(method, path string) bool {
 			return true
 		}
 	}
-	return (path == "/api/judge/attendance" && method == "GET") || path == "/api/stats" || path == "/api/presets" || path == "/api/settings/presets" || path == "/api/settings/checkin"
+	return path == "/api/stats" || path == "/api/presets" || path == "/api/settings/presets" || path == "/api/settings/checkin"
 }
 
 func (federation *Federation) Proxy(writer http.ResponseWriter, httpRequest *http.Request) {

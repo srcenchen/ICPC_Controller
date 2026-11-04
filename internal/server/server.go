@@ -52,16 +52,11 @@ type Config struct {
 	PowerH        *service.PowerHandler
 	InstallH      *service.InstallHandler
 	Snapshots     *service.SnapshotManager
-	JudgeBridge   *service.JudgeBridge
 }
 
 // New creates a new Server.
 func New(cfg Config) *Server {
 	mux := http.NewServeMux()
-	if cfg.JudgeBridge != nil {
-		mux.HandleFunc("POST /api/judge/attendance", cfg.JudgeBridge.Attendance)
-		mux.HandleFunc("GET /api/judge/attendance", cfg.JudgeBridge.ListAttendance)
-	}
 	if cfg.Federation != nil {
 		mux.HandleFunc("GET /api/cluster/status", cfg.Federation.Status)
 		mux.HandleFunc("GET /api/cluster/rooms", cfg.Federation.Rooms)

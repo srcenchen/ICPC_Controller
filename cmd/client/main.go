@@ -1028,12 +1028,6 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				log.Printf("[client] no active broadcast state on startup")
 			}
 
-		case "judge_presence_response":
-			var response model.JudgePresenceResponse
-			if err := json.Unmarshal([]byte(line), &response); err == nil {
-				deliverJudgeProof(sender, response)
-			}
-
 		case "checkin_config":
 			var cfg model.CheckinConfigMessage
 			if err := json.Unmarshal([]byte(line), &cfg); err != nil {
