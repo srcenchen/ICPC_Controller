@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { formatBytes, statusLabel } from "@/lib/utils";
 import type { DistFile, DistributeTask } from "@/lib/types";
 import { Badge, Button, Card, Empty, Input, PageHeader, statusTone } from "@/components/ui";
+import { DistributionProgress, distributionIssues } from "@/components/distribution-progress";
 import { TargetPicker } from "@/components/targets";
 import { FleetTable, Jobs, queueFleet, useFleetDevices } from "@/components/fleet";
 import { useApp, useDevices } from "@/state";
@@ -47,7 +48,18 @@ export function Distribute() {
   }
 
   const running = task && ["running", "completed", "stopped", "failed"].includes(task.status) && task.files;
-  const progresses = Object.values(task?.progresses || {});
+  const progresses = Object.values(task?.progresses || {}).sort((a, b) =>
+    Number(distributionIssues.has(b.status)) - Number(distributionIssues.has(a.status)) || a.device_id - b.device_id);
+
+  async function retry(deviceID: number) {
+    try {
+      await api("/api/distribution/retry", { method: "POST", body: JSON.stringify({ device_id: deviceID }) });
+      await loadTask();
+      app.toast(deviceID ? `已重试 #${deviceID}` : "已补传未完成的设备", "ok");
+    } catch (err) {
+      app.toast(err instanceof Error ? err.message : "重试失败", "bad");
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -119,10 +131,12 @@ export function Distribute() {
         <Card>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <Badge tone={statusTone(task.status)}>{statusLabel(task.status)}</Badge>
-            <span className="text-sm">{task.active_file || "准备中"} · {(task.active_idx || 0) + 1}/{task.files?.length || 0}</span>
             {task.status === "running" && <Button size="sm" variant="destructive" onClick={() => api("/api/distribution/stop", { method: "POST" }).then(loadTask)}>停止</Button>}
             {task.status !== "running" && <Button size="sm" variant="outline" onClick={() => api("/api/distribution/reset", { method: "POST" }).then(() => setTask(null))}>返回准备</Button>}
-            <Button size="sm" variant="outline" onClick={() => api("/api/distribution/retry", { method: "POST", body: JSON.stringify({ device_id: 0 }) }).then(() => app.toast("已补传未完成的设备", "ok"))}>补传缺失</Button>
+            {task.status !== "running" && progresses.some((item) => distributionIssues.has(item.status)) && <Button size="sm" variant="outline" onClick={() => retry(0)}>补传缺失</Button>}
+          </div>
+          <div className="mb-3">
+            <DistributionProgress task={task} />
           </div>
           <div className="table-wrap max-h-80">
             <table className="data">
@@ -133,7 +147,7 @@ export function Distribute() {
                     <td>#{item.device_id} {item.hostname}</td>
                     <td className="w-48"><div className="h-2 overflow-hidden rounded bg-muted"><div className="h-full bg-primary" style={{ width: Math.min(100, item.percentage || 0) + "%" }} /></div></td>
                     <td>{statusLabel(item.status)}{item.error ? " · " + item.error : ""}</td>
-                    <td>{item.status === "failed" && <Button size="sm" variant="ghost" onClick={() => api("/api/distribution/retry", { method: "POST", body: JSON.stringify({ device_id: item.device_id }) })}>重试</Button>}</td>
+                    <td>{distributionIssues.has(item.status) && <Button size="sm" variant="ghost" onClick={() => retry(item.device_id)}>重试</Button>}</td>
                   </tr>
                 ))}
                 {!progresses.length && <tr><td colSpan={4}><Empty>等待设备回报</Empty></td></tr>}

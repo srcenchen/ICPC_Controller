@@ -1,19 +1,49 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { statusLabel, timeAgo } from "@/lib/utils";
-import type { CommandLog } from "@/lib/types";
-import { Badge, Card, Empty, statusTone } from "@/components/ui";
+import type { CommandLog, DistributeTask } from "@/lib/types";
+import { Badge, Button, Card, Empty, statusTone } from "@/components/ui";
+import { DistributionProgress } from "@/components/distribution-progress";
 import { Metric } from "@/components/targets";
 import { Snapshots } from "@/components/snapshots";
 import { useApp } from "@/state";
 
 export function Dashboard() {
   const app = useApp();
+  const { cloudAll, roomID, onAdmin, toast } = app;
   const [stats, setStats] = useState({ total_devices: 0, online_devices: 0, offline_devices: 0, checked_in: 0, total_commands: 0, recent_commands: [] as CommandLog[] });
+  const [task, setTask] = useState<DistributeTask | null>(null);
   useEffect(() => {
-    if (app.cloudAll) return;
-    api<typeof stats>("/api/stats").then(setStats).catch((err) => app.toast(err.message, "bad"));
-  }, [app.cloudAll, app.roomID]);
+    setTask(null);
+    if (cloudAll) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const endpoint = (path: string) => roomID ? `/api/cluster/rooms/${encodeURIComponent(roomID)}/proxy/${path}` : `/api/${path}`;
+    let statsTimer: number | undefined;
+    let taskTimer: number | undefined;
+    const refreshStats = (reportError = false) => api<typeof stats>(endpoint("stats"), { signal })
+      .then((value) => { if (!signal.aborted) setStats(value); })
+      .catch((err) => { if (reportError && !signal.aborted) toast(err.message, "bad"); });
+    const refreshTask = () => api<DistributeTask>(endpoint("distribution/status"), { signal })
+      .then((value) => { if (!signal.aborted) setTask(value); })
+      .catch(() => {});
+    refreshStats(true);
+    refreshTask();
+    const unsubscribe = onAdmin(({ event }) => {
+      if (event.startsWith("distribute_") && taskTimer === undefined) {
+        taskTimer = window.setTimeout(() => { taskTimer = undefined; refreshTask(); }, 400);
+      }
+      if (["device_connected", "device_disconnected", "checkin_updated", "command_result"].includes(event) && statsTimer === undefined) {
+        statsTimer = window.setTimeout(() => { statsTimer = undefined; refreshStats(); }, 400);
+      }
+    });
+    return () => {
+      unsubscribe();
+      clearTimeout(statsTimer);
+      clearTimeout(taskTimer);
+      controller.abort();
+    };
+  }, [cloudAll, roomID, onAdmin, toast]);
 
   if (app.cloudAll) {
     const total = app.rooms.reduce((sum, room) => sum + room.devices.length, 0);
@@ -60,6 +90,20 @@ export function Dashboard() {
         <Metric label="在线" value={stats.online_devices} onClick={() => app.go("devices")} />
         <Metric label="离线" value={stats.offline_devices} />
         <Metric label="已签到" value={stats.checked_in} onClick={() => app.go("checkin")} />
+      </div>
+      {task?.status === "running" && (
+        <Card>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="font-semibold">进行中的分发</h2>
+            <Button size="sm" variant="ghost" onClick={() => app.go("distribute")}>查看分发</Button>
+          </div>
+          <DistributionProgress task={task} />
+        </Card>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={() => app.go("broadcast")}>广播</Button>
+        <Button size="sm" variant="outline" onClick={() => app.go("network")}>网络</Button>
+        <Button size="sm" variant="outline" onClick={() => app.go("screen")}>屏幕</Button>
       </div>
       <Card>
         <div className="mb-2 flex items-center justify-between">
