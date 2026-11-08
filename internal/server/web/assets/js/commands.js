@@ -41,8 +41,9 @@ function renderCommandPage(devices) {
             '<div class="panel-title" style="margin-top:16px;">命令</div>' +
             '<div id="preset-buttons" style="margin-bottom:8px; display:flex; flex-wrap:wrap; gap:6px;">加载预设...</div>' +
             '<textarea id="command-editor">echo "Hello from ICPC!"</textarea>' +
-            '<div style="margin-top:12px;">' +
+            '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">' +
                 '<button class="btn btn-primary" onclick="executeCommand()">▶ 执行</button>' +
+                '<button class="btn btn-outline btn-sm" onclick="retryFailedCommands()">重跑失败机</button>' +
             '</div>' +
         '</div>' +
         '<div class="result-panel" style="display:flex; flex-direction:column;">' +
@@ -289,12 +290,36 @@ function cancelDeviceCommand(key) {
 
 function isActiveEvent(evt) {
     if (!activeBatch) return false;
-    if (activeBatch.cmdIds[evt.command_id]) return true;
-    if (evt.command_id && evt.device_id) {
-        activeBatch.cmdIds[evt.command_id] = true;
-        return true;
-    }
+    // Only accept events for commands we explicitly tracked as part of this batch.
+    if (evt.command_id && activeBatch.cmdIds[evt.command_id]) return true;
     return false;
+}
+
+function retryFailedCommands() {
+    if (!activeBatch || !activeBatch.rows) {
+        showToast("当前没有可重跑的批次", "info");
+        return;
+    }
+    var failedIds = [];
+    Object.keys(activeBatch.rows).forEach(function(k) {
+        var row = activeBatch.rows[k];
+        if (row && (row.status === "failed" || row.status === "timeout") && row.deviceId) {
+            failedIds.push(row.deviceId);
+        }
+    });
+    if (failedIds.length === 0) {
+        showToast("没有失败的设备", "info");
+        return;
+    }
+    var cmdText = cmdEditor ? cmdEditor.getValue() : $("#command-editor").val();
+    if (!cmdText || !String(cmdText).trim()) {
+        showToast("请在命令框中填入要重跑的命令", "error");
+        return;
+    }
+    if (!confirm("将对 " + failedIds.length + " 台失败设备重新执行命令？")) return;
+    selectedTargets = failedIds.slice();
+    if (typeof renderDeviceList === "function") renderDeviceList();
+    executeCommand();
 }
 
 function handleCommandOutput(evt) {
@@ -416,10 +441,14 @@ function renderStaticOutput(cmd) {
             var did = child.target_id || '?';
             staticDetailData[did] = fullOut;
             var summary = fullOut.replace(/\n/g, ' ').substring(0, 80);
-            if (!summary) summary = '<span style="color:var(--text-secondary)">(无输出)</span>';
+            if (!summary) {
+                summary = '<span style="color:var(--text-secondary)">(无输出)</span>';
+            } else {
+                summary = escapeHtml(summary);
+            }
             html += '<tr class="result-row ' + child.status + '" data-device-id="' + did + '">' +
                 '<td class="col-device"><strong>#' + did + '</strong></td>' +
-                '<td class="col-status"><span class="badge badge-' + child.status + '">' + statusLabel(child.status) + '</span></td>' +
+                '<td class="col-status"><span class="badge badge-' + escapeHtml(child.status) + '">' + statusLabel(child.status) + '</span></td>' +
                 '<td class="col-summary" style="font-size:12px;">' + summary + '</td>' +
                 '<td class="col-duration">' + (child.duration_ms ? (child.duration_ms + 'ms') : '-') + '</td>' +
             '</tr>';

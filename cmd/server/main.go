@@ -75,7 +75,21 @@ func main() {
 	authHandler := service.NewAuthHandler(settings)
 
 	service.DistributionMgr = service.NewDistributionManager(hub, "data/uploads")
+	service.DistributionMgr.SetHostnameLookup(func(deviceID int) string {
+		d, err := deviceRepo.GetByAssignedID(deviceID)
+		if err != nil || d == nil {
+			return ""
+		}
+		if d.Hostname != "" {
+			return d.Hostname
+		}
+		if d.StudentName != "" {
+			return d.StudentName
+		}
+		return ""
+	})
 	distHandler := service.NewDistributionHandler(service.DistributionMgr)
+	screenProxyH := service.NewScreenProxyHandler(deviceRepo)
 
 	// TCP handler for client connections.
 	tcpHandler := service.NewTCPHandler(hub, deviceRepo, commandRepo, idAssigner, dispatcher, settings, broadcastRepo)
@@ -104,6 +118,7 @@ func main() {
 		BroadcastH:    broadcastHandler,
 		AuthH:         authHandler,
 		DistributionH: distHandler,
+		ScreenProxyH:  screenProxyH,
 	}
 
 	srv := server.New(cfg)

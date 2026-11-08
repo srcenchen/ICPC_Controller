@@ -232,12 +232,16 @@ func (h *AuthHandler) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 
-		// Exclude public paths
+		// Exclude public paths (display screens need read-only broadcast data without admin login)
 		if path == "/login.html" ||
 			path == "/api/auth/login" ||
 			strings.HasPrefix(path, "/assets/") ||
 			strings.HasPrefix(path, "/broadcast/") ||
-			path == "/ws/broadcast" {
+			path == "/ws/broadcast" ||
+			(r.Method == http.MethodGet && (path == "/api/broadcast/pages" ||
+				path == "/api/broadcast/config" ||
+				path == "/api/broadcast/fonts" ||
+				path == "/api/broadcast/config/countdown")) {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -219,7 +219,7 @@ func getWatermarkData() (string, string, string, string) {
 	defer state.mu.Unlock()
 
 	status := "在线"
-	if state.send == nil {
+	if state.sender == nil {
 		status = "离线"
 	}
 	name := state.studentName

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ICPC Remote Control — 体验全量改造报告</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --surface: #1a2332;
+    --surface2: #243044;
+    --border: #2d3a4f;
+    --text: #e7ecf3;
+    --muted: #8b9bb4;
+    --accent: #3b82f6;
+    --accent-soft: rgba(59,130,246,.15);
+    --success: #22c55e;
+    --success-soft: rgba(34,197,94,.12);
+    --warning: #f59e0b;
+    --warning-soft: rgba(245,158,11,.12);
+    --danger: #ef4444;
+    --danger-soft: rgba(239,68,68,.12);
+    --code-bg: #0b1220;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  .hero {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f1419 50%, #1a1a2e 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 48px 24px 40px;
+  }
+  .hero-inner { max-width: 960px; margin: 0 auto; }
+  .hero .eyebrow {
+    display: inline-block;
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 4px 10px;
+    border-radius: 999px;
+    margin-bottom: 16px;
+  }
+  .hero h1 {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -.02em;
+    margin-bottom: 12px;
+  }
+  .hero p { color: var(--muted); max-width: 640px; font-size: 16px; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 16px 24px;
+    margin-top: 24px; color: var(--muted); font-size: 13px;
+  }
+  .meta strong { color: var(--text); font-weight: 600; }
+
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 40px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 16px;
+  }
+  .stat-card .num {
+    font-size: 28px; font-weight: 700;
+    letter-spacing: -.02em;
+  }
+  .stat-card .label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .stat-card.blue .num { color: var(--accent); }
+  .stat-card.green .num { color: var(--success); }
+  .stat-card.amber .num { color: var(--warning); }
+  .stat-card.red .num { color: var(--danger); }
+
+  h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 48px 0 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: -.01em;
+  }
+  h2 .tag {
+    font-size: 11px;
+    font-weight: 600;
+    vertical-align: middle;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  h2 .tag.s1 { background: var(--danger-soft); color: var(--danger); }
+  h2 .tag.s2 { background: var(--warning-soft); color: var(--warning); }
+  h2 .tag.s3 { background: var(--success-soft); color: var(--success); }
+  h3 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 28px 0 10px;
+    color: #c5d0e0;
+  }
+  p, li { color: #c8d1de; }
+  .lead { color: var(--muted); margin-bottom: 20px; font-size: 14px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+    margin: 14px 0;
+  }
+  .card h3 { margin-top: 0; }
+  .card + .card { margin-top: 12px; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    margin: 12px 0 8px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    background: var(--surface2);
+  }
+  tr:last-child td { border-bottom: none; }
+  .table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    margin: 14px 0;
+  }
+
+  code, .path {
+    font-family: "SF Mono", "Fira Code", "JetBrains Mono", Menlo, monospace;
+    font-size: 12.5px;
+    background: var(--code-bg);
+    color: #9ecbff;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: "SF Mono", "Fira Code", Menlo, monospace;
+    font-size: 12.5px;
+    color: #b8c7db;
+    margin: 10px 0;
+    line-height: 1.5;
+  }
+
+  ul { padding-left: 1.25em; margin: 8px 0; }
+  li { margin: 4px 0; }
+  li strong { color: var(--text); }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge-done { background: var(--success-soft); color: var(--success); }
+  .badge-new { background: var(--accent-soft); color: var(--accent); }
+  .badge-fix { background: var(--warning-soft); color: var(--warning); }
+
+  .before-after {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin: 12px 0;
+  }
+  @media (max-width: 700px) {
+    .before-after { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 24px; }
+  }
+  .ba {
+    border-radius: 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+  }
+  .ba.before { background: var(--danger-soft); border-color: rgba(239,68,68,.25); }
+  .ba.after { background: var(--success-soft); border-color: rgba(34,197,94,.25); }
+  .ba .ba-label {
+    font-size: 11px; font-weight: 700; letter-spacing: .06em;
+    text-transform: uppercase; margin-bottom: 6px;
+  }
+  .ba.before .ba-label { color: var(--danger); }
+  .ba.after .ba-label { color: var(--success); }
+  .ba p { font-size: 13.5px; margin: 0; color: var(--text); }
+
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    margin-bottom: 32px;
+  }
+  .toc h3 { margin: 0 0 10px; }
+  .toc ol { padding-left: 1.3em; color: var(--muted); }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  .file-list {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin: 10px 0;
+  }
+  .file-chip {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    color: #a8c0e0;
+    padding: 3px 8px;
+    border-radius: 6px;
+  }
+
+  .footer {
+    margin-top: 56px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+  }
+  .check { color: var(--success); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="eyebrow">Experience Overhaul Report</div>
+    <h1>ICPC Remote Control<br>体验全量改造报告</h1>
+    <p>
+      在明确「抛开安全、只做体验」的前提下，对后端、Linux 客户端、P2P 分发库与 Web 管理端
+      完成 Sprint 1–3 全量落地。目标：赛场可用、控制台不打断、分发可预期、大屏有内容。
+    </p>
+    <div class="meta">
+      <span>项目：<strong>ICPCRemoteControl</strong></span>
+      <span>范围：<strong>体验 / 稳定性 / UX</strong>（不含安全加固）</span>
+      <span>构建：<strong>go build ./cmd/server · ./cmd/client 通过</strong></span>
+      <span>日期：<strong>2026-07-12</strong></span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="summary-grid">
+    <div class="stat-card blue"><div class="num">3</div><div class="label">Sprint 全部完成</div></div>
+    <div class="stat-card green"><div class="num">40+</div><div class="label">体验修复 / 增强点</div></div>
+    <div class="stat-card amber"><div class="num">25+</div><div class="label">触及源文件</div></div>
+    <div class="stat-card red"><div class="num">0</div><div class="label">编译错误（主路径）</div></div>
+  </div>
+
+  <nav class="toc">
+    <h3>目录</h3>
+    <ol>
+      <li><a href="#overview">改造总览与原则</a></li>
+      <li><a href="#s1">Sprint 1 — 赛前阻断（修「坏掉」）</a></li>
+      <li><a href="#s2">Sprint 2 — 明显好用</a></li>
+      <li><a href="#s3">Sprint 3 — 体验升级</a></li>
+      <li><a href="#files">文件变更清单</a></li>
+      <li><a href="#verify">建议验收清单</a></li>
+      <li><a href="#out">明确未做项</a></li>
+    </ol>
+  </nav>
+
+  <!-- ========== OVERVIEW ========== -->
+  <h2 id="overview">1. 改造总览与原则</h2>
+  <p class="lead">
+    审计结论：功能面已远超原始需求，但赛场可靠性被四条链路拖垮——大屏空白、在线状态不可信、
+    客户端断线 panic、分发完成态卡死。本轮只修「体验与稳定性」，不引入 JWT/mTLS 等安全项。
+  </p>
+
+  <div class="card">
+    <h3>优先级原则</h3>
+    <ul>
+      <li><strong>P0</strong>：会直接导致赛场事故（空白大屏、假离线、客户端崩溃、分发永不结束）</li>
+      <li><strong>P1</strong>：每天用的控制台体验（整页刷新打断、进度不可读、跨网段看不了屏）</li>
+      <li><strong>P2</strong>：升级项（断点续传、导航分组、多机房子网策略）</li>
+    </ul>
+  </div>
+
+  <div class="before-after">
+    <div class="ba before">
+      <div class="ba-label">改造前痛点</div>
+      <p>广播鉴权后空白；Hub 重连踢新连接；客户端 send panic；P2P progressCh 永不 close；设备事件整页重刷；屏幕直连选手 IP。</p>
+    </div>
+    <div class="ba after">
+      <div class="ba-label">改造后状态</div>
+      <p>大屏 WS 快照 + 只读 API；Hub 指针安全注销；safeSender；progress 必 close + 超时 stall；防抖局部更新；屏幕服务端反代。</p>
+    </div>
+  </div>
+
+  <!-- ========== SPRINT 1 ========== -->
+  <h2 id="s1">2. Sprint 1 — 赛前阻断 <span class="tag s1">S1 · 必做</span></h2>
+  <p class="lead">先保证「能用、不崩、状态可信」。</p>
+
+  <div class="card">
+    <h3>2.1 Hub 重连竞态 + 在线枚举</h3>
+    <p><span class="badge badge-fix">修复</span> <code>internal/biz/hub.go</code></p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>改动</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>Unregister 指针相等</td><td>仅当 <code>h.clients[id] == client</code> 时删除，避免旧连接注销误删新连接</td></tr>
+          <tr><td>Register 替换旧连接</td><td>关掉旧 TCP 并 <code>close(old.Send)</code>，写泵可退出</td></tr>
+          <tr><td><code>OnlineIDs()</code></td><td>取代分发里 <code>for i := 1; i &lt;= 200</code> 硬编码扫描</td></tr>
+          <tr><td><code>TrySend()</code></td><td>非阻塞发送，缓冲满时不挂死调度协程</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>验收：</strong>客户端快速重连 10 次，后台始终在线且命令可下发。</p>
+  </div>
+
+  <div class="card">
+    <h3>2.2 客户端 send 生命周期 / 签到 / fastfetch / 清理</h3>
+    <p><span class="badge badge-fix">修复</span> <code>cmd/client/main.go</code> · <code>watermark.go</code></p>
+    <ul>
+      <li>引入 <code>safeSender</code>：加锁 + closed 标志，禁止向已关闭 channel send（根治 panic）</li>
+      <li>签到 / 签退：<code>sender == nil</code> 时返回「设备当前离线」JSON，不再崩溃</li>
+      <li><code>collectSystemInfo</code>：fastfetch 失败发送最小合法 <code>system_info</code> stub，避免被服务端踢线死循环</li>
+      <li>断线 <code>cleanupClientProcesses</code>：Kill 命令进程组 + 关闭终端 PTY</li>
+      <li>启动时创建空 <code>~/server</code>（对齐需求）；IPv6 友好 <code>ensurePort</code>；hostnamectl 失败打日志</li>
+      <li>命令输出 Scanner 缓冲扩至 1MB，减少长行丢失</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>2.3 广播大屏首次有内容</h3>
+    <p><span class="badge badge-fix">修复</span> <code>broadcast_ws.go</code> · <code>broadcast_handler.go</code> · <code>auth_handler.go</code> · <code>display.js</code></p>
+    <ul>
+      <li>WS <code>Serve</code> 连接后立刻用 <code>SnapshotProvider</code> 推 <code>pages_updated</code></li>
+      <li>每连接独立 write mutex，避免 carousel / 推送并发写导致断流</li>
+      <li>GET 只读：pages / config / fonts / countdown 免登录（大屏选手机无需 JWT）</li>
+      <li>字体/图片路径 <code>filepath.Base</code></li>
+      <li><code>display.js</code>：重连清理 ping 定时器；滚动字幕 <code>scaleFont</code></li>
+    </ul>
+    <p><strong>验收：</strong>未登录打开 <code>/broadcast/before</code>，数秒内显示当前页。</p>
+  </div>
+
+  <div class="card">
+    <h3>2.4 P2P 完成态 + 任务不卡死</h3>
+    <p><span class="badge badge-fix">修复</span> <code>gosilver.go</code> · <code>receiver.go</code> · <code>conn_pool</code> · <code>distribution.go</code></p>
+    <ul>
+      <li><code>runDownload</code> <code>defer closeProgress()</code>：终端态后 channel 关闭，客户端 <code>for range</code> 退出，post_cmd 可执行</li>
+      <li>RPC：nil 检查 + dial/读写超时；坏连接 <code>DiscardConn</code> 不回池</li>
+      <li>PeerReg 独立 dial，不再永久占用连接池槽位</li>
+      <li>分发 wait：单文件 30min 超时；3min 无进度标 <code>stalled</code></li>
+      <li>目标列表 <code>OnlineIDs()</code>；进度 hostname 经 <code>SetHostnameLookup</code> 查库</li>
+      <li>文件名 Base + 存在性校验；非阻塞 <code>TrySend</code></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>2.5 前端致命交互</h3>
+    <p><span class="badge badge-fix">修复</span> <code>terminal.js</code> · <code>app.js</code> · <code>commands.js</code></p>
+    <ul>
+      <li>终端 modal 独立 id，关闭不再 <code>$(".modal-overlay").remove()</code> 误关设备详情</li>
+      <li>设备 WS 事件防抖 400ms + 优先局部更新</li>
+      <li>命令历史 summary <code>escapeHtml</code>（体验向的输出展示安全）</li>
+      <li><code>isActiveEvent</code> 仅认本批次 cmdIds，避免进度串台</li>
+    </ul>
+  </div>
+
+  <!-- ========== SPRINT 2 ========== -->
+  <h2 id="s2">3. Sprint 2 — 明显好用 <span class="tag s2">S2 · 好</span></h2>
+  <p class="lead">控制台「不打断」、看板可用、分发可读、屏幕跨网段可用。</p>
+
+  <div class="card">
+    <h3>3.1 Toast + 局部刷新</h3>
+    <ul>
+      <li>全局 <code>showToast(msg, type)</code> + CSS（success / error / info）</li>
+      <li>设备表：<code>data-device-id</code> + <code>patchDevicesFromEvent</code></li>
+      <li>签到：弹窗打开时只刷统计，避免冲掉表单</li>
+      <li>网络页：事件不再强制整页 <code>loadNetwork()</code></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3.2 看板聚合</h3>
+    <p><code>dashboard.js</code> 重写：</p>
+    <ul>
+      <li>统计卡：总数 / 在线 / 离线 / 已签到 / 未签到 / 命令数，可点击跳转</li>
+      <li>「进行中任务」：分发状态、当前文件、平均进度、完成/失败数</li>
+      <li>快捷入口：广播 / 网络 / 屏幕</li>
+      <li>WS 触发 <code>patchDashboardStats</code> / <code>patchDashboardTasks</code>，非整页替换</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3.3 分发 UI 可读</h3>
+    <ul>
+      <li>总体进度 = 各机 <strong>percentage 平均</strong>（非仅完成台数）</li>
+      <li>失败 / stalled 行置顶；可重试 stalled / cancelled</li>
+      <li>多文件显示「第 i/n 个文件」</li>
+      <li>步骤编号修正（去掉跳号）；文案去掉误导性「分块上传」</li>
+      <li>列表显示真实 hostname（服务端注入）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3.4 屏幕监控服务端反代</h3>
+    <p><span class="badge badge-new">新增</span> <code>screen_proxy_handler.go</code> · 路由 <code>GET /api/devices/{id}/screen</code></p>
+    <div class="before-after">
+      <div class="ba before">
+        <div class="ba-label">Before</div>
+        <p>浏览器直连 <code>http://选手IP:8090/screen</code> — 跨 VLAN/NAT 失败，HTTPS 混内容。</p>
+      </div>
+      <div class="ba after">
+        <div class="ba-label">After</div>
+        <p>管理端同源 <code>/api/devices/{id}/screen</code>，服务端按设备 IP 反代 MJPEG/单帧。</p>
+      </div>
+    </div>
+    <p><code>screen.js</code> 缩略图与 HD 弹窗全部改走 proxy；iOS 轮询亦使用 device id。</p>
+  </div>
+
+  <div class="card">
+    <h3>3.5 命令体验</h3>
+    <ul>
+      <li>按钮「重跑失败机」：收集 failed/timeout 的 deviceId 再执行</li>
+      <li>批次事件归属收紧，避免并发下发串结果</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>3.6 杂项可靠性</h3>
+    <ul>
+      <li>尊重 <code>--avahi</code> / <code>cfg.Avahi</code>；stop 时 Wait 防僵尸进程</li>
+      <li>HTTP <code>WriteTimeout: 0</code>，避免长 WS / 屏幕流被切断</li>
+      <li>设备 <code>formatDateTime</code> pad 笔误修正</li>
+    </ul>
+  </div>
+
+  <!-- ========== SPRINT 3 ========== -->
+  <h2 id="s3">4. Sprint 3 — 体验升级 <span class="tag s3">S3 · 增强</span></h2>
+  <p class="lead">断点续传、终端重连、导航分组、多机房 P2P 策略。</p>
+
+  <div class="card">
+    <h3>4.1 分发断点续传</h3>
+    <p><code>gosilver.runDownload</code>：</p>
+    <ul>
+      <li>同名文件且 size 匹配时 Open 而非 Create 清空</li>
+      <li>元数据文件 <code>*.icpc-chunks</code> 记录已完成 chunk 索引</li>
+      <li>失败/取消保留 part + meta；完成删除 meta</li>
+      <li>已完成 chunk 跳过下载并重新 Report 给 tracker 供 P2P</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>4.2 终端增强</h3>
+    <ul>
+      <li>断线提示 +「重连」按钮</li>
+      <li><code>window.resize</code> → fit addon</li>
+      <li>独立 overlay，不干扰其他弹窗</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>4.3 导航分组</h3>
+    <p><code>index.html</code> 顶栏按运维场景分组：</p>
+    <pre>监控：仪表盘 · 设备 · 屏幕
+运维：命令 · 网络 · 分发
+比赛：签到 · 广播
+系统：设置 · 退出</pre>
+  </div>
+
+  <div class="card">
+    <h3>4.4 P2P 多机房子网策略</h3>
+    <ul>
+      <li><code>PeerSelectMode</code>：<code>subnet</code>（同 /24）或 <code>all</code>（任意 peer）</li>
+      <li>环境变量 <code>ICPC_P2P_PEER_MODE=subnet|all</code></li>
+      <li>默认 <code>all</code>，适配多 VLAN 机房（避免全部打回 seeder）</li>
+    </ul>
+  </div>
+
+  <!-- ========== FILES ========== -->
+  <h2 id="files">5. 文件变更清单</h2>
+  <p class="lead">按端归类，便于 code review 与部署对照。</p>
+
+  <div class="card">
+    <h3>后端 / Hub / 服务</h3>
+    <div class="file-list">
+      <span class="file-chip">internal/biz/hub.go</span>
+      <span class="file-chip">internal/service/distribution.go</span>
+      <span class="file-chip">internal/service/broadcast_ws.go</span>
+      <span class="file-chip">internal/service/broadcast_handler.go</span>
+      <span class="file-chip">internal/service/auth_handler.go</span>
+      <span class="file-chip">internal/service/screen_proxy_handler.go</span>
+      <span class="file-chip">internal/server/server.go</span>
+      <span class="file-chip">cmd/server/main.go</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Linux 客户端</h3>
+    <div class="file-list">
+      <span class="file-chip">cmd/client/main.go</span>
+      <span class="file-chip">cmd/client/watermark.go</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>P2P（go-silver-core）</h3>
+    <div class="file-list">
+      <span class="file-chip">pkg/go-silver-core/pkg/gosilver/gosilver.go</span>
+      <span class="file-chip">pkg/go-silver-core/internal/gsp_sdk/client/receiver.go</span>
+      <span class="file-chip">pkg/go-silver-core/pkg/conn_pool/pool.go</span>
+      <span class="file-chip">pkg/go-silver-core/internal/gsp_sdk/server/queue.go</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>前端 Web</h3>
+    <div class="file-list">
+      <span class="file-chip">internal/server/web/index.html</span>
+      <span class="file-chip">assets/js/app.js</span>
+      <span class="file-chip">assets/js/dashboard.js</span>
+      <span class="file-chip">assets/js/devices.js</span>
+      <span class="file-chip">assets/js/checkin.js</span>
+      <span class="file-chip">assets/js/commands.js</span>
+      <span class="file-chip">assets/js/terminal.js</span>
+      <span class="file-chip">assets/js/screen.js</span>
+      <span class="file-chip">assets/js/distribute.js</span>
+      <span class="file-chip">assets/css/style.css</span>
+      <span class="file-chip">broadcast/display.js</span>
+    </div>
+  </div>
+
+  <!-- ========== VERIFY ========== -->
+  <h2 id="verify">6. 建议验收清单</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>#</th><th>场景</th><th>期望结果</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>客户端快速断线重连 10 次</td><td>后台始终显示在线，命令可下发</td></tr>
+        <tr><td>2</td><td>未登录打开 <code>/broadcast/before</code></td><td>数秒内有页面内容，非永久「等待配置」</td></tr>
+        <tr><td>3</td><td>离线时选手提交签到</td><td>提示离线，客户端不崩溃</td></tr>
+        <tr><td>4</td><td>无 fastfetch 机器上线</td><td>能注册成功（stub system_info）</td></tr>
+        <tr><td>5</td><td>P2P 分发至完成</td><td>进度 channel 结束；post_cmd 执行；UI 到 completed</td></tr>
+        <tr><td>6</td><td>一台机卡住 / 超时</td><td>标 stalled/failed，不永久堵后续文件</td></tr>
+        <tr><td>7</td><td>中断后重下同文件</td><td>跳过已完成 chunk（续传）</td></tr>
+        <tr><td>8</td><td>设备详情 → 开终端 → 关终端</td><td>详情 modal 仍在</td></tr>
+        <tr><td>9</td><td>设备频繁上下线时看设备列表</td><td>不全页闪烁；滚动位置大致保持</td></tr>
+        <tr><td>10</td><td>屏幕监控页</td><td>同源 proxy 出画，不依赖浏览器直连选手网段</td></tr>
+        <tr><td>11</td><td>看板</td><td>可见分发任务摘要与统计卡跳转</td></tr>
+        <tr><td>12</td><td><code>--avahi=false</code></td><td>不启动 avahi-publish</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h3>构建命令</h3>
+    <pre>go build -o server ./cmd/server
+go build -o client ./cmd/client
+
+# 可选：多 VLAN 强制同网段 P2P
+export ICPC_P2P_PEER_MODE=subnet   # 或 all（默认）</pre>
+  </div>
+
+  <!-- ========== OUT OF SCOPE ========== -->
+  <h2 id="out">7. 明确未做项（本轮范围外）</h2>
+  <div class="card">
+    <ul>
+      <li>JWT 密钥随机化、强制改默认密码、TCP/GSP 认证、mTLS</li>
+      <li>SaveDir / post_cmd 沙箱与命令白名单</li>
+      <li>整文件 SHA-256 校验、CORS / CSP 收紧</li>
+      <li>前端框架重写、构建工具链、完整自动化测试套件</li>
+      <li>广播编辑器图层局部更新 / 页面拖拽排序（API 已有，UI 未补全）</li>
+    </ul>
+    <p style="margin-top:12px;color:var(--muted);font-size:13px;">
+      上述项属于安全或下一阶段 polish；若威胁模型从「纯内网」变为「可达外网 / 访客 Wi‑Fi」，应优先做控制面认证。
+    </p>
+  </div>
+
+  <div class="card" style="border-color: rgba(34,197,94,.35);">
+    <h3><span class="check">✓</span> 结论</h3>
+    <p>
+      Sprint 1–3 体验向改造已全部落地，主路径编译通过。
+      赛场最伤的四条链路（大屏、在线状态、客户端通道、分发完成态）已处理；
+      控制台局部刷新、屏幕反代、看板与分发可读性显著提升。
+      建议按第 6 节清单在实机 / 模拟机房跑一轮回归后再上场。
+    </p>
+  </div>
+
+  <footer class="footer">
+    ICPC Remote Control · 体验全量改造报告 · 生成于 2026-07-12 · 不含安全专项
+  </footer>
+</main>
+
+</body>
+</html>

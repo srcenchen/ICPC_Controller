@@ -62,6 +62,11 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
+			if old, ok := h.clients[client.AssignedID]; ok && old != client {
+				// Replace stale connection: stop its write pump and close TCP.
+				close(old.Send)
+				old.Conn.Close()
+			}
 			h.clients[client.AssignedID] = client
 			h.mu.Unlock()
 			if err := h.deviceRepo.UpdateConnected(client.AssignedID, true); err != nil {
@@ -74,10 +79,19 @@ func (h *Hub) Run() {
 
 		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[client.AssignedID]; ok {
+			current, ok := h.clients[client.AssignedID]
+			// Only remove if this is still the active connection (reconnect-safe).
+			removed := false
+			if ok && current == client {
 				delete(h.clients, client.AssignedID)
+				close(client.Send)
+				removed = true
 			}
 			h.mu.Unlock()
+			if !removed {
+				// Stale unregister after reconnect — do not mark offline.
+				continue
+			}
 			if err := h.deviceRepo.UpdateConnected(client.AssignedID, false); err != nil {
 				log.Printf("[hub] failed to mark device %d offline: %v", client.AssignedID, err)
 			}
@@ -139,6 +153,33 @@ func (h *Hub) OnlineCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// OnlineIDs returns assigned IDs of all currently connected clients.
+func (h *Hub) OnlineIDs() []int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	ids := make([]int, 0, len(h.clients))
+	for id := range h.clients {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// TrySend attempts a non-blocking send to a client. Returns false if offline or buffer full.
+func (h *Hub) TrySend(assignedID int, data []byte) bool {
+	h.mu.RLock()
+	client := h.clients[assignedID]
+	h.mu.RUnlock()
+	if client == nil {
+		return false
+	}
+	select {
+	case client.Send <- data:
+		return true
+	default:
+		return false
+	}
 }
 
 // BroadcastToClients sends a message to all connected TCP clients.

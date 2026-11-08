@@ -99,6 +99,7 @@ function connectAdminWS() {
     };
 }
 
+var _deviceEventTimer = null;
 function handleAdminEvent(msg) {
     switch (msg.event) {
         case "device_connected":
@@ -106,22 +107,51 @@ function handleAdminEvent(msg) {
         case "device_updated":
         case "checkin_updated":
             updateStatusBar();
-            if (currentPage === "dashboard") loadDashboard();
-            if (currentPage === "devices") loadDevices();
-            if (currentPage === "checkin") loadCheckin();
-            if (currentPage === "network") loadNetwork();
-            if (currentPage === "screen" && typeof refreshScreenDevices === "function") refreshScreenDevices();
-            // Update the device list on commands page if it's open.
-            if (currentPage === "commands" && typeof allDevices !== "undefined") {
-                $.getJSON("/api/devices", function(devices) {
-                    allDevices = devices;
-                    if ($("#device-selector-container").length) renderDeviceList();
-                });
-            }
+            // Debounce full reloads; prefer partial row updates when available.
+            clearTimeout(_deviceEventTimer);
+            _deviceEventTimer = setTimeout(function() {
+                if (currentPage === "dashboard" && typeof patchDashboardStats === "function") {
+                    patchDashboardStats();
+                } else if (currentPage === "dashboard") {
+                    loadDashboard();
+                }
+                if (currentPage === "devices") {
+                    if (typeof patchDevicesFromEvent === "function") {
+                        patchDevicesFromEvent(msg);
+                    } else {
+                        loadDevices();
+                    }
+                }
+                if (currentPage === "checkin") {
+                    if (typeof patchCheckinFromEvent === "function") {
+                        patchCheckinFromEvent(msg);
+                    } else if (typeof loadCheckin === "function") {
+                        loadCheckin();
+                    }
+                }
+                // Network: never full-reload while editing rules.
+                if (currentPage === "network" && typeof patchNetworkDevices === "function") {
+                    patchNetworkDevices();
+                }
+                if (currentPage === "screen" && typeof refreshScreenDevices === "function") refreshScreenDevices();
+                if (currentPage === "commands" && typeof allDevices !== "undefined") {
+                    $.getJSON("/api/devices", function(devices) {
+                        allDevices = devices;
+                        if ($("#device-selector-container").length) renderDeviceList();
+                    });
+                }
+                if (currentPage === "dashboard" && typeof patchDashboardTasks === "function") {
+                    patchDashboardTasks();
+                }
+            }, 400);
             break;
         case "command_status":
             if (currentPage === "commands" && typeof updateCommandResult === "function") updateCommandResult(msg.data);
-            if (currentPage === "dashboard") loadDashboard();
+            if (currentPage === "dashboard" && typeof patchDashboardStats === "function") {
+                patchDashboardStats();
+            } else if (currentPage === "dashboard") {
+                loadDashboard();
+            }
             break;
         case "command_output":
             if (typeof handleCommandOutput === "function") handleCommandOutput(msg.data);
@@ -133,6 +163,9 @@ function handleAdminEvent(msg) {
         case "distribute_task_finished":
             if (currentPage === "distribute" && typeof handleDistributeEvent === "function") {
                 handleDistributeEvent(msg.event, msg.data);
+            }
+            if (currentPage === "dashboard" && typeof patchDashboardTasks === "function") {
+                patchDashboardTasks();
             }
             break;
     }
@@ -176,7 +209,25 @@ function statusLabel(status) {
         running: "运行中",
         completed: "已完成",
         failed: "失败",
-        timeout: "超时"
+        timeout: "超时",
+        stalled: "卡住",
+        cancelled: "已取消"
     };
     return map[status] || status;
+}
+
+// Lightweight toast (replaces frequent alert for non-blocking feedback)
+function showToast(message, type) {
+    type = type || "info";
+    var $host = $("#toast-host");
+    if (!$host.length) {
+        $("body").append('<div id="toast-host"></div>');
+        $host = $("#toast-host");
+    }
+    var el = $('<div class="toast toast-' + type + '"></div>').text(message);
+    $host.append(el);
+    setTimeout(function() {
+        el.addClass("toast-hide");
+        setTimeout(function() { el.remove(); }, 300);
+    }, 2800);
 }

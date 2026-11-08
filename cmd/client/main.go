@@ -53,10 +53,57 @@ var (
 	configWaiters  = make(map[string]chan model.CheckinConfigMessage)
 )
 
+// safeSender serializes sends and prevents send-on-closed panic.
+type safeSender struct {
+	mu     sync.Mutex
+	ch     chan []byte
+	closed bool
+}
+
+func newSafeSender(buf int) *safeSender {
+	return &safeSender{ch: make(chan []byte, buf)}
+}
+
+func (s *safeSender) Send(data []byte) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.ch <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *safeSender) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.ch)
+	}
+}
+
+func (s *safeSender) Chan() <-chan []byte {
+	if s == nil {
+		return nil
+	}
+	return s.ch
+}
+
 // clientState holds mutable state that the HTTP handler needs to access.
 type clientState struct {
 	mu              sync.Mutex
-	send            chan<- []byte
+	sender          *safeSender
 	assignedID      int
 	hostname        string
 	macAddr         string
@@ -91,6 +138,8 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Println("[client] starting")
+
+	ensureServerConfigFile()
 
 	go startWatermark()
 
@@ -169,12 +218,12 @@ func handleCheckinInfo(w http.ResponseWriter, r *http.Request) {
 	hostname := state.hostname
 	macAddr := state.macAddr
 	ipAddr := state.ipAddr
-	sendCh := state.send
+	sender := state.sender
 	state.mu.Unlock()
 
 	// Fetch fresh config and check-in status from server on every request.
-	welcomeText, warningText, postCheckinMsg, postCheckoutMsg := fetchCheckinConfig(sendCh)
-	checkinStatus, studentName, studentNum, checkinTime, checkoutTime := fetchCheckinStatus(sendCh)
+	welcomeText, warningText, postCheckinMsg, postCheckoutMsg := fetchCheckinConfig(sender)
+	checkinStatus, studentName, studentNum, checkinTime, checkoutTime := fetchCheckinStatus(sender)
 
 	if assignedID == 0 {
 		writeClientJSON(w, http.StatusOK, map[string]interface{}{
@@ -213,8 +262,8 @@ func handleCheckinInfo(w http.ResponseWriter, r *http.Request) {
 
 // fetchCheckinConfig requests the latest check-in config from the server via TCP.
 // Falls back to cached values if the TCP channel is unavailable or the request times out.
-func fetchCheckinConfig(sendCh chan<- []byte) (welcome, warning, postCheckin, postCheckout string) {
-	if sendCh == nil {
+func fetchCheckinConfig(sender *safeSender) (welcome, warning, postCheckin, postCheckout string) {
+	if sender == nil {
 		// TCP not connected yet, use cached values.
 		state.mu.Lock()
 		welcome = state.welcomeText
@@ -232,7 +281,7 @@ func fetchCheckinConfig(sendCh chan<- []byte) (welcome, warning, postCheckin, po
 	configWaiters[corrID] = respCh
 	checkinMu.Unlock()
 
-	sendJSONSafe(sendCh, model.CheckinConfigMessage{
+	sendJSONSafe(sender, model.CheckinConfigMessage{
 		Type:          "query_checkin_config",
 		CorrelationID: corrID,
 	})
@@ -265,19 +314,19 @@ func fetchCheckinConfig(sendCh chan<- []byte) (welcome, warning, postCheckin, po
 }
 
 // fetchBroadcastState queries the server for the current broadcast state.
-func fetchBroadcastState(sendCh chan<- []byte) {
-	if sendCh == nil {
+func fetchBroadcastState(sender *safeSender) {
+	if sender == nil {
 		return
 	}
-	sendJSONSafe(sendCh, model.BroadcastQueryMessage{
+	sendJSONSafe(sender, model.BroadcastQueryMessage{
 		Type: "query_broadcast_state",
 	})
 }
 
 // fetchCheckinStatus queries the server for the current check-in status of this device.
 // Falls back to cached values if the TCP channel is unavailable or the request times out.
-func fetchCheckinStatus(sendCh chan<- []byte) (status int, name, num, timeIn, timeOut string) {
-	if sendCh == nil {
+func fetchCheckinStatus(sender *safeSender) (status int, name, num, timeIn, timeOut string) {
+	if sender == nil {
 		state.mu.Lock()
 		status = state.checkinStatus
 		name = state.studentName
@@ -295,7 +344,7 @@ func fetchCheckinStatus(sendCh chan<- []byte) (status int, name, num, timeIn, ti
 	checkinWaiters[corrID] = respCh
 	checkinMu.Unlock()
 
-	sendJSONSafe(sendCh, model.CheckinMessage{
+	sendJSONSafe(sender, model.CheckinMessage{
 		Type:          "checkin_query",
 		CorrelationID: corrID,
 	})
@@ -332,12 +381,18 @@ func fetchCheckinStatus(sendCh chan<- []byte) (status int, name, num, timeIn, ti
 func handleCheckinSubmit(w http.ResponseWriter, r *http.Request) {
 	state.mu.Lock()
 	assignedID := state.assignedID
-	sendCh := state.send
+	sender := state.sender
 	state.mu.Unlock()
 
 	if assignedID == 0 {
 		writeClientJSON(w, http.StatusOK, map[string]interface{}{
 			"success": false, "message": "设备尚未注册到服务器",
+		})
+		return
+	}
+	if sender == nil {
+		writeClientJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false, "message": "设备当前离线，请稍后再试",
 		})
 		return
 	}
@@ -365,10 +420,18 @@ func handleCheckinSubmit(w http.ResponseWriter, r *http.Request) {
 	checkinWaiters[corrID] = respCh
 	checkinMu.Unlock()
 
-	sendJSONSafe(sendCh, model.CheckinMessage{
+	if !sendJSONSafe(sender, model.CheckinMessage{
 		Type: "checkin", CorrelationID: corrID,
 		StudentName: body.StudentName, StudentNum: body.StudentNum,
-	})
+	}) {
+		checkinMu.Lock()
+		delete(checkinWaiters, corrID)
+		checkinMu.Unlock()
+		writeClientJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false, "message": "设备当前离线，请稍后再试",
+		})
+		return
+	}
 
 	var success bool
 	var msg string
@@ -411,12 +474,18 @@ func handleCheckinSubmit(w http.ResponseWriter, r *http.Request) {
 func handleCheckoutSubmit(w http.ResponseWriter, r *http.Request) {
 	state.mu.Lock()
 	assignedID := state.assignedID
-	sendCh := state.send
+	sender := state.sender
 	state.mu.Unlock()
 
 	if assignedID == 0 {
 		writeClientJSON(w, http.StatusOK, map[string]interface{}{
 			"success": false, "message": "设备尚未注册到服务器",
+		})
+		return
+	}
+	if sender == nil {
+		writeClientJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false, "message": "设备当前离线，请稍后再试",
 		})
 		return
 	}
@@ -427,9 +496,17 @@ func handleCheckoutSubmit(w http.ResponseWriter, r *http.Request) {
 	checkinWaiters[corrID] = respCh
 	checkinMu.Unlock()
 
-	sendJSONSafe(sendCh, model.CheckinMessage{
+	if !sendJSONSafe(sender, model.CheckinMessage{
 		Type: "checkout", CorrelationID: corrID,
-	})
+	}) {
+		checkinMu.Lock()
+		delete(checkinWaiters, corrID)
+		checkinMu.Unlock()
+		writeClientJSON(w, http.StatusOK, map[string]interface{}{
+			"success": false, "message": "设备当前离线，请稍后再试",
+		})
+		return
+	}
 
 	var success bool
 	var cmd, msg string
@@ -468,14 +545,21 @@ func handleCheckoutSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func sendJSONSafe(ch chan<- []byte, v interface{}) {
-	data, _ := json.Marshal(v)
-	data = append(data, '\n')
-	select {
-	case ch <- data:
-	default:
-		log.Printf("[checkin-http] send buffer full, dropping message of type %T", v)
+func sendJSONSafe(sender *safeSender, v interface{}) bool {
+	if sender == nil {
+		return false
 	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("[client] json marshal error (%T): %v", v, err)
+		return false
+	}
+	data = append(data, '\n')
+	if !sender.Send(data) {
+		log.Printf("[client] send dropped (offline or buffer full) type %T", v)
+		return false
+	}
+	return true
 }
 
 func writeClientJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -583,10 +667,45 @@ func resolveServer(flagAddr string) (string, error) {
 }
 
 func ensurePort(addr string) string {
+	// Already has port (host:port or [ipv6]:port)
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	// Bare IPv6 without brackets
+	if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+		return net.JoinHostPort(addr, serverPort)
+	}
+	// host or IPv4 without port
 	if !strings.Contains(addr, ":") {
-		return addr + ":" + serverPort
+		return net.JoinHostPort(addr, serverPort)
 	}
 	return addr
+}
+
+// ensureServerConfigFile creates an empty ~/server file if missing (per requirements).
+func ensureServerConfigFile() {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, serverFile))
+	}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		paths = append(paths, filepath.Join("/home", sudoUser, serverFile))
+		paths = append(paths, filepath.Join("/Users", sudoUser, serverFile))
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return
+		}
+	}
+	if len(paths) == 0 {
+		return
+	}
+	p := paths[0]
+	if err := os.WriteFile(p, []byte{}, 0644); err != nil {
+		log.Printf("[client] create empty server config %s: %v", p, err)
+	} else {
+		log.Printf("[client] created empty server config: %s", p)
+	}
 }
 
 func readStoredID() *int {
@@ -653,28 +772,23 @@ func connectAndServe(serverAddr string, storedID *int) error {
 	}
 
 	// Single write channel serializes all writes to conn.
-	send := make(chan []byte, writeBufSize)
+	sender := newSafeSender(writeBufSize)
 	writeDone := make(chan struct{})
-	sendClosed := false
-	defer func() {
-		if !sendClosed {
-			close(send)
-		}
-	}()
+	defer sender.Close()
 
 	// Register the send channel for HTTP handler access.
 	state.mu.Lock()
-	state.send = send
+	state.sender = sender
 	state.mu.Unlock()
 	defer func() {
 		state.mu.Lock()
-		state.send = nil
+		state.sender = nil
 		state.mu.Unlock()
 	}()
 
 	go func() {
 		defer close(writeDone)
-		for msg := range send {
+		for msg := range sender.Chan() {
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if _, err := conn.Write(msg); err != nil {
 				return
@@ -687,7 +801,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 
 	// --- Registration ---
 	hostname, _ := os.Hostname()
-	sendJSON(send, model.RegisterRequest{
+	sendJSON(sender, model.RegisterRequest{
 		Type: "register_request", AssignedID: storedID,
 		MacAddress: getMacAddress(), Hostname: hostname,
 	})
@@ -715,30 +829,15 @@ func connectAndServe(serverAddr string, storedID *int) error {
 	state.ipAddr = getLocalIP()
 	state.mu.Unlock()
 
-	sysInfo, _ := collectSystemInfo(regResp.AssignedID)
-	if sysInfo != nil {
-		for i, rawEntry := range sysInfo.Info {
-			var entryMap map[string]interface{}
-			if err := json.Unmarshal(rawEntry, &entryMap); err == nil {
-				if t, ok := entryMap["type"].(string); ok && t == "Title" {
-					if res, ok := entryMap["result"].(map[string]interface{}); ok {
-						res["hostName"] = newHostname
-						entryMap["result"] = res
-						newRaw, _ := json.Marshal(entryMap)
-						sysInfo.Info[i] = json.RawMessage(newRaw)
-					}
-				}
-			}
-		}
-	}
-	sendJSON(send, sysInfo)
+	sysInfo := collectSystemInfo(regResp.AssignedID, newHostname)
+	sendJSON(sender, sysInfo)
 	log.Println("[client] ready")
 
 	// Fetch checkin config, status, and broadcast state immediately on connection to sync watermark and client state
 	go func() {
-		fetchCheckinConfig(send)
-		fetchCheckinStatus(send)
-		fetchBroadcastState(send)
+		fetchCheckinConfig(sender)
+		fetchCheckinStatus(sender)
+		fetchBroadcastState(sender)
 		updateWatermark()
 	}()
 
@@ -750,6 +849,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 	var cmdMu sync.Mutex
 	termSessions := make(map[string]*os.File)
 	var termMu sync.Mutex
+	defer cleanupClientProcesses(&cmdMu, runningCmds, &termMu, termSessions)
 
 	// Heartbeat.
 	go func() {
@@ -760,7 +860,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 			case <-done:
 				return
 			case <-ticker.C:
-				sendJSON(send, model.PingMessage{Type: "ping"})
+				sendJSON(sender, model.PingMessage{Type: "ping"})
 			}
 		}
 	}()
@@ -770,11 +870,8 @@ func connectAndServe(serverAddr string, storedID *int) error {
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			// Close send immediately so the write pump stops accepting new messages,
-			// then wait at most 1s for it to drain. On a dead connection, writes fail
-			// instantly (RST), so this completes quickly.
-			close(send)
-			sendClosed = true
+			// Close send so write pump exits; wait briefly for drain.
+			sender.Close()
 			select {
 			case <-writeDone:
 			case <-time.After(time.Second):
@@ -798,7 +895,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				log.Printf("[client] unmarshal execute: %v", err)
 				continue
 			}
-			go runCommandStreaming(send, &msg, &cmdMu, runningCmds)
+			go runCommandStreaming(sender, &msg, &cmdMu, runningCmds)
 
 		case "cancel":
 			var msg model.CancelMessage
@@ -810,7 +907,6 @@ func connectAndServe(serverAddr string, storedID *int) error {
 			if cmd, ok := runningCmds[msg.CommandID]; ok && cmd.Process != nil {
 				log.Printf("[client] canceling cmd %d (pid=%d)", msg.CommandID, cmd.Process.Pid)
 				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				cmd.Process.Wait()
 				delete(runningCmds, msg.CommandID)
 			}
 			cmdMu.Unlock()
@@ -821,7 +917,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				log.Printf("[client] unmarshal terminal_open: %v", err)
 				continue
 			}
-			go startTerminal(send, &msg, &termMu, termSessions)
+			go startTerminal(sender, &msg, &termMu, termSessions)
 
 		case "terminal_input":
 			var msg model.TerminalInputMessage
@@ -932,7 +1028,7 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				log.Printf("[client] unmarshal distribute_start: %v", err)
 				continue
 			}
-			go handleDistributeStart(send, &msg)
+			go handleDistributeStart(sender, &msg)
 
 		case "distribute_cancel":
 			go handleDistributeCancel()
@@ -945,44 +1041,102 @@ func connectAndServe(serverAddr string, storedID *int) error {
 				log.Printf("[client] unmarshal distribute_precheck: %v", err)
 				continue
 			}
-			go handleDistributePrecheck(send, msg.ServerIP)
+			go handleDistributePrecheck(sender, msg.ServerIP)
 
 		case "pong":
 		}
 	}
 }
 
-func sendJSON(ch chan<- []byte, v interface{}) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		log.Printf("[client] json marshal error (%T): %v", v, err)
-		return
+func sendJSON(sender *safeSender, v interface{}) {
+	sendJSONSafe(sender, v)
+}
+
+func cleanupClientProcesses(cmdMu *sync.Mutex, running map[int64]*exec.Cmd, termMu *sync.Mutex, sessions map[string]*os.File) {
+	cmdMu.Lock()
+	for id, cmd := range running {
+		if cmd != nil && cmd.Process != nil {
+			log.Printf("[client] cleanup cmd %d pid=%d", id, cmd.Process.Pid)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		delete(running, id)
 	}
-	data = append(data, '\n')
-	select {
-	case ch <- data:
-	default:
-		log.Printf("[client] send buffer full, dropping message of type %T", v)
+	cmdMu.Unlock()
+
+	termMu.Lock()
+	for sid, f := range sessions {
+		log.Printf("[client] cleanup terminal %s", sid)
+		_ = f.Close()
+		delete(sessions, sid)
 	}
+	termMu.Unlock()
 }
 
 func renameHostname(id int, prefix string) {
-	name := fmt.Sprintf("%s-%d", prefix, id)
-	exec.Command("hostnamectl", "set-hostname", name).Run()
-	exec.Command("hostname", name).Run()
-}
-
-func collectSystemInfo(id int) (*model.SystemInfoMessage, error) {
-	out, err := exec.Command("fastfetch", "--format", "json").Output()
-	if err != nil {
-		return nil, err
+	if prefix == "" {
+		prefix = "cwxu-icpc"
 	}
-	var entries []json.RawMessage
-	json.Unmarshal(out, &entries)
-	return &model.SystemInfoMessage{Type: "system_info", AssignedID: id, Info: entries}, nil
+	name := fmt.Sprintf("%s-%d", prefix, id)
+	if out, err := exec.Command("hostnamectl", "set-hostname", name).CombinedOutput(); err != nil {
+		log.Printf("[client] hostnamectl set-hostname %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("hostname", name).CombinedOutput(); err != nil {
+		log.Printf("[client] hostname %s: %v (%s)", name, err, strings.TrimSpace(string(out)))
+	}
 }
 
-func runCommandStreaming(send chan<- []byte, msg *model.ExecuteMessage, mu *sync.Mutex, running map[int64]*exec.Cmd) {
+func collectSystemInfo(id int, hostname string) *model.SystemInfoMessage {
+	out, err := exec.Command("fastfetch", "--format", "json").Output()
+	if err == nil {
+		var entries []json.RawMessage
+		if json.Unmarshal(out, &entries) == nil && len(entries) > 0 {
+			for i, rawEntry := range entries {
+				var entryMap map[string]interface{}
+				if err := json.Unmarshal(rawEntry, &entryMap); err == nil {
+					if t, ok := entryMap["type"].(string); ok && t == "Title" {
+						if res, ok := entryMap["result"].(map[string]interface{}); ok {
+							res["hostName"] = hostname
+							entryMap["result"] = res
+							newRaw, _ := json.Marshal(entryMap)
+							entries[i] = json.RawMessage(newRaw)
+						}
+					}
+				}
+			}
+			return &model.SystemInfoMessage{Type: "system_info", AssignedID: id, Info: entries}
+		}
+		log.Printf("[client] fastfetch parse failed, using stub system_info")
+	} else {
+		log.Printf("[client] fastfetch failed: %v — sending stub system_info", err)
+	}
+	// Minimal valid payload so server accepts registration.
+	title, _ := json.Marshal(map[string]interface{}{
+		"type": "Title",
+		"result": map[string]interface{}{
+			"userName":  "unknown",
+			"hostName":  hostname,
+			"homeDir":   "",
+			"exePath":   "",
+			"userShell": "/bin/bash",
+		},
+	})
+	osEntry, _ := json.Marshal(map[string]interface{}{
+		"type": "OS",
+		"result": map[string]interface{}{
+			"name":       "Linux",
+			"prettyName": "Linux (fastfetch unavailable)",
+			"version":    "",
+			"id":         "linux",
+		},
+	})
+	return &model.SystemInfoMessage{
+		Type:       "system_info",
+		AssignedID: id,
+		Info:       []json.RawMessage{title, osEntry},
+	}
+}
+
+func runCommandStreaming(sender *safeSender, msg *model.ExecuteMessage, mu *sync.Mutex, running map[int64]*exec.Cmd) {
 	log.Printf("[client] cmd %d: %s", msg.CommandID, msg.Command)
 	start := time.Now()
 
@@ -1004,20 +1158,17 @@ func runCommandStreaming(send chan<- []byte, msg *model.ExecuteMessage, mu *sync
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() {
+	scanOut := func(r io.Reader, stream string) {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(r)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
 		for scanner.Scan() {
-			sendJSON(send, model.CommandOutputMessage{Type: "command_output", CommandID: msg.CommandID, Stream: "stdout", Line: scanner.Text()})
+			sendJSON(sender, model.CommandOutputMessage{Type: "command_output", CommandID: msg.CommandID, Stream: stream, Line: scanner.Text()})
 		}
-	}()
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			sendJSON(send, model.CommandOutputMessage{Type: "command_output", CommandID: msg.CommandID, Stream: "stderr", Line: scanner.Text()})
-		}
-	}()
+	}
+	go scanOut(stdout, "stdout")
+	go scanOut(stderr, "stderr")
 
 	wg.Wait()
 	cmd.Wait()
@@ -1036,19 +1187,19 @@ func runCommandStreaming(send chan<- []byte, msg *model.ExecuteMessage, mu *sync
 		status = model.CommandStatusFailed
 	}
 
-	sendJSON(send, model.CommandResultMessage{
+	sendJSON(sender, model.CommandResultMessage{
 		Type: "command_result", CommandID: msg.CommandID,
 		Status: status, ErrorOutput: errMsg, DurationMS: duration.Milliseconds(),
 	})
 	log.Printf("[client] cmd %d: %s (%v)", msg.CommandID, status, duration)
 }
 
-func startTerminal(send chan<- []byte, msg *model.TerminalOpenMessage, mu *sync.Mutex, sessions map[string]*os.File) {
+func startTerminal(sender *safeSender, msg *model.TerminalOpenMessage, mu *sync.Mutex, sessions map[string]*os.File) {
 	log.Printf("[client] terminal %s: cols=%d rows=%d", msg.SessionID, msg.Cols, msg.Rows)
 	cmd := exec.Command("bash")
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(msg.Rows), Cols: uint16(msg.Cols)})
 	if err != nil {
-		sendJSON(send, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
+		sendJSON(sender, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
 		return
 	}
 	mu.Lock()
@@ -1057,11 +1208,11 @@ func startTerminal(send chan<- []byte, msg *model.TerminalOpenMessage, mu *sync.
 
 	defer func() {
 		f.Close()
-		cmd.Wait()
+		_ = cmd.Wait()
 		mu.Lock()
 		delete(sessions, msg.SessionID)
 		mu.Unlock()
-		sendJSON(send, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
+		sendJSON(sender, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
 	}()
 
 	go func() {
@@ -1071,11 +1222,11 @@ func startTerminal(send chan<- []byte, msg *model.TerminalOpenMessage, mu *sync.
 			if err != nil {
 				return
 			}
-			sendJSON(send, model.TerminalOutputMessage{Type: "terminal_output", SessionID: msg.SessionID, Data: string(buf[:n])})
+			sendJSON(sender, model.TerminalOutputMessage{Type: "terminal_output", SessionID: msg.SessionID, Data: string(buf[:n])})
 		}
 	}()
 
-	cmd.Wait()
+	_ = cmd.Wait()
 }
 
 var (
@@ -1083,7 +1234,7 @@ var (
 	activeDistClient *gosilver.Client
 )
 
-func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage) {
+func handleDistributeStart(sender *safeSender, msg *model.DistributeStartMessage) {
 	activeDistMu.Lock()
 	if activeDistClient != nil {
 		log.Println("[client-dist] stopping previous active download")
@@ -1095,7 +1246,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 	// Ensure save directory exists
 	if err := os.MkdirAll(msg.SaveDir, 0755); err != nil {
 		log.Printf("[client-dist] failed to create save dir: %v", err)
-		sendJSON(send, model.DistributeProgressMessage{
+		sendJSON(sender, model.DistributeProgressMessage{
 			Type:     "distribute_progress",
 			TaskID:   msg.TaskID,
 			DeviceID: state.assignedID,
@@ -1115,7 +1266,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 	progressCh, err := client.StartDownload()
 	if err != nil {
 		log.Printf("[client-dist] failed to start download: %v", err)
-		sendJSON(send, model.DistributeProgressMessage{
+		sendJSON(sender, model.DistributeProgressMessage{
 			Type:     "distribute_progress",
 			TaskID:   msg.TaskID,
 			DeviceID: state.assignedID,
@@ -1139,7 +1290,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 			}
 			lastStatus = prog.Status
 
-			sendJSON(send, model.DistributeProgressMessage{
+			sendJSON(sender, model.DistributeProgressMessage{
 				Type:        "distribute_progress",
 				TaskID:      taskID,
 				DeviceID:    state.assignedID,
@@ -1156,7 +1307,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 			log.Printf("[client-dist] executing post command: %s", postCmd)
 
 			// Show temporary executing status in UI
-			sendJSON(send, model.DistributeProgressMessage{
+			sendJSON(sender, model.DistributeProgressMessage{
 				Type:        "distribute_progress",
 				TaskID:      taskID,
 				DeviceID:    state.assignedID,
@@ -1173,7 +1324,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 
 			if err != nil {
 				log.Printf("[client-dist] post command failed: %v, output: %s", err, string(output))
-				sendJSON(send, model.DistributeProgressMessage{
+				sendJSON(sender, model.DistributeProgressMessage{
 					Type:        "distribute_progress",
 					TaskID:      taskID,
 					DeviceID:    state.assignedID,
@@ -1185,7 +1336,7 @@ func handleDistributeStart(send chan<- []byte, msg *model.DistributeStartMessage
 				})
 			} else {
 				log.Printf("[client-dist] post command succeeded")
-				sendJSON(send, model.DistributeProgressMessage{
+				sendJSON(sender, model.DistributeProgressMessage{
 					Type:        "distribute_progress",
 					TaskID:      taskID,
 					DeviceID:    state.assignedID,
@@ -1215,8 +1366,8 @@ func handleDistributeCancel() {
 	activeDistMu.Unlock()
 }
 
-func handleDistributePrecheck(send chan<- []byte, serverIP string) {
-	addr := fmt.Sprintf("%s:48080", serverIP)
+func handleDistributePrecheck(sender *safeSender, serverIP string) {
+	addr := net.JoinHostPort(serverIP, "48080")
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	var success bool
 	var errMsg string
@@ -1228,7 +1379,7 @@ func handleDistributePrecheck(send chan<- []byte, serverIP string) {
 		conn.Close()
 	}
 
-	sendJSON(send, map[string]interface{}{
+	sendJSON(sender, map[string]interface{}{
 		"type":      "distribute_precheck_response",
 		"device_id": state.assignedID,
 		"success":   success,

@@ -199,6 +199,49 @@ tr:last-child td {
 .badge-failed { background: rgba(220,53,69,0.1); color: var(--danger); }
 .badge-timeout { background: rgba(220,53,69,0.1); color: var(--danger); }
 .badge-dispatched { background: rgba(13,110,253,0.1); color: var(--accent); }
+.badge-stalled { background: rgba(220,53,69,0.1); color: var(--danger); }
+.badge-cancelled { background: rgba(0,0,0,0.06); color: var(--text-secondary); }
+.badge-stopped { background: rgba(0,0,0,0.06); color: var(--text-secondary); }
+
+/* Toast notifications */
+#toast-host {
+    position: fixed;
+    top: 72px;
+    right: 16px;
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+.toast {
+    min-width: 200px;
+    max-width: 360px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background: #fff;
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+    font-size: 13px;
+    opacity: 1;
+    transition: opacity 0.3s ease, transform 0.3s ease;
+    pointer-events: auto;
+}
+.toast-hide { opacity: 0; transform: translateY(-6px); }
+.toast-success { border-left: 3px solid var(--success); }
+.toast-error { border-left: 3px solid var(--danger); }
+.toast-info { border-left: 3px solid var(--accent); }
+
+.nav-group-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    padding: 0 6px;
+    align-self: center;
+    opacity: 0.7;
+    white-space: nowrap;
+}
 
 /* Buttons */
 .btn {

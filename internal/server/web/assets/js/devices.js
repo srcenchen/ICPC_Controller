@@ -13,16 +13,16 @@ function renderDevices(devices) {
         : devices.map(function(d) {
             var checkinLabel = getCheckinStatusLabel(d.checkin_status);
             var studentInfo = d.student_name ? escapeHtml(d.student_name) + ' <small style="color:var(--text-secondary)">' + escapeHtml(d.student_num) + '</small>' : '-';
-            return '<tr class="clickable-row" onclick="showDeviceDetail(' + d.assigned_id + ')">' +
+            return '<tr class="clickable-row" data-device-id="' + d.assigned_id + '" onclick="showDeviceDetail(' + d.assigned_id + ')">' +
                 '<td><strong>#' + d.assigned_id + '</strong></td>' +
-                '<td>' + escapeHtml(d.hostname) + '</td>' +
+                '<td class="col-hostname">' + escapeHtml(d.hostname) + '</td>' +
                 '<td>' + escapeHtml(d.username) + '</td>' +
                 '<td>' + escapeHtml(d.os_name) + '</td>' +
                 '<td>' + escapeHtml(d.cpu_model) + '</td>' +
                 '<td>' + renderMemBar(d.memory_used, d.memory_total) + '</td>' +
-                '<td>' + checkinLabel + '</td>' +
-                '<td>' + studentInfo + '</td>' +
-                '<td><span class="badge badge-' + (d.connected ? 'online' : 'offline') + '">' + (d.connected ? '在线' : '离线') + '</span></td>' +
+                '<td class="col-checkin">' + checkinLabel + '</td>' +
+                '<td class="col-student">' + studentInfo + '</td>' +
+                '<td class="col-status"><span class="badge badge-' + (d.connected ? 'online' : 'offline') + '">' + (d.connected ? '在线' : '离线') + '</span></td>' +
                 '</tr>';
         }).join("");
 
@@ -205,10 +205,49 @@ function formatDateTime(str) {
     try {
         var d = new Date(str);
         if (isNaN(d.getTime())) return str;
-        var pad = function(n) { return n < 0 ? '0' : (n < 10 ? '0' + n : n); };
+        var pad = function(n) { return n < 10 ? '0' + n : String(n); };
         return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' +
                pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
     } catch(e) {
         return str;
     }
+}
+
+// Partial update for WS events — avoid full table rebuild when possible.
+function patchDevicesFromEvent(msg) {
+    if (currentPage !== "devices") return;
+    if (!$("#content .table-container tbody").length) {
+        loadDevices();
+        return;
+    }
+    var id = msg && msg.data && msg.data.assigned_id;
+    if (!id) {
+        // Soft refresh list without wiping open detail modal.
+        $.getJSON("/api/devices", function(devices) {
+            devices.forEach(function(d) {
+                var row = $('tr[data-device-id="' + d.assigned_id + '"]');
+                if (!row.length) return;
+                row.find(".col-hostname").text(d.hostname || "");
+                row.find(".col-checkin").html(getCheckinStatusLabel(d.checkin_status));
+                var studentInfo = d.student_name ? escapeHtml(d.student_name) + ' <small style="color:var(--text-secondary)">' + escapeHtml(d.student_num) + '</small>' : '-';
+                row.find(".col-student").html(studentInfo);
+                row.find(".col-status").html('<span class="badge badge-' + (d.connected ? 'online' : 'offline') + '">' + (d.connected ? '在线' : '离线') + '</span>');
+            });
+        });
+        return;
+    }
+    $.getJSON("/api/devices/" + id, function(d) {
+        var row = $('tr[data-device-id="' + d.assigned_id + '"]');
+        if (!row.length) {
+            loadDevices();
+            return;
+        }
+        row.find(".col-hostname").text(d.hostname || "");
+        row.find(".col-checkin").html(getCheckinStatusLabel(d.checkin_status));
+        var studentInfo = d.student_name ? escapeHtml(d.student_name) + ' <small style="color:var(--text-secondary)">' + escapeHtml(d.student_num) + '</small>' : '-';
+        row.find(".col-student").html(studentInfo);
+        row.find(".col-status").html('<span class="badge badge-' + (d.connected ? 'online' : 'offline') + '">' + (d.connected ? '在线' : '离线') + '</span>');
+    }).fail(function() {
+        // ignore single-row fail
+    });
 }

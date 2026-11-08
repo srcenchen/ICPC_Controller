@@ -22,9 +22,10 @@ var webFS embed.FS
 
 // Server is the main HTTP server.
 type Server struct {
-	httpServer *http.Server
-	avahiCmd   *exec.Cmd
-	bindIP     string
+	httpServer  *http.Server
+	avahiCmd    *exec.Cmd
+	bindIP      string
+	enableAvahi bool
 }
 
 // Config holds server configuration.
@@ -42,8 +43,9 @@ type Config struct {
 	NetworkH    *service.NetworkHandler
 	CheckinH    *service.CheckinHandler
 	BroadcastH  *service.BroadcastHandler
-	AuthH       *service.AuthHandler
+	AuthH         *service.AuthHandler
 	DistributionH *service.DistributionHandler
+	ScreenProxyH  *service.ScreenProxyHandler
 }
 
 // New creates a new Server.
@@ -127,6 +129,10 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("POST /api/distribution/reset", cfg.DistributionH.ResetTask)
 	}
 
+	if cfg.ScreenProxyH != nil {
+		mux.HandleFunc("GET /api/devices/{id}/screen", cfg.ScreenProxyH.Proxy)
+	}
+
 	mux.HandleFunc("GET /ws/broadcast", service.BroadcastWS.Serve)
 	mux.HandleFunc("GET /ws/admin", cfg.AdminWSH.Serve)
 	mux.HandleFunc("GET /ws/terminal/{id}", cfg.TerminalWSH.Serve)
@@ -170,16 +176,21 @@ func New(cfg Config) *Server {
 			Addr:         ":" + cfg.Port,
 			Handler:      handler,
 			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 15 * time.Second,
+			WriteTimeout: 0, // allow long-lived WS / screen proxy streams
 			IdleTimeout:  120 * time.Second,
 		},
-		bindIP: cfg.BindIP,
+		bindIP:      cfg.BindIP,
+		enableAvahi: cfg.Avahi,
 	}
 }
 
 // Start begins listening and handles graceful shutdown.
 func (s *Server) Start() error {
-	go s.startAvahi()
+	if s.enableAvahi {
+		go s.startAvahi()
+	} else {
+		log.Println("[avahi] disabled by config")
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -228,7 +239,9 @@ func (s *Server) startAvahi() {
 func (s *Server) stopAvahi() {
 	if s.avahiCmd != nil && s.avahiCmd.Process != nil {
 		log.Println("[avahi] stopping avahi-publish")
-		s.avahiCmd.Process.Signal(syscall.SIGTERM)
+		_ = s.avahiCmd.Process.Signal(syscall.SIGTERM)
+		// Avoid zombie avahi-publish
+		go s.avahiCmd.Wait()
 	}
 }
 
