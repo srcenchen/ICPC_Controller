@@ -44,7 +44,7 @@ export function SettingsPage() {
 
 function DeploymentForm({ initial }: { initial: Deployment }) {
   const app = useApp();
-  const [form, setForm] = useState({ ...initial, token: "" });
+  const [form, setForm] = useState({ ...initial, token: initial.token || "" });
   return (
     <Card>
       <h2 className="font-semibold">部署</h2>
@@ -57,7 +57,7 @@ function DeploymentForm({ initial }: { initial: Deployment }) {
         </Select>
         <Input placeholder="机房名称" value={form.room_name} onChange={(event) => setForm({ ...form, room_name: event.target.value })} />
         <Input placeholder="云端地址 https://…" value={form.cloud_url} onChange={(event) => setForm({ ...form, cloud_url: event.target.value })} />
-        <Input type="password" placeholder={initial.token_set ? "密钥已配置，留空则保持" : "连接密钥，至少 32 字符"} value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} />
+        <Input type="text" placeholder="连接密钥，至少 32 字符" value={form.token} onChange={(event) => setForm({ ...form, token: event.target.value })} />
         <div className="grid grid-cols-2 gap-3">
           <Input type="number" min={1} value={form.device_id_start || 1} onChange={(event) => setForm({ ...form, device_id_start: Number(event.target.value) })} />
           <Input placeholder="中转局域网 IP，可留空" value={form.advertise_ip} onChange={(event) => setForm({ ...form, advertise_ip: event.target.value })} />
@@ -76,6 +76,9 @@ function DeploymentForm({ initial }: { initial: Deployment }) {
           crypto.getRandomValues(bytes);
           setForm({ ...form, token: Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("") });
         }}>生成密钥</Button>
+        <Button variant="outline" disabled={!form.token} onClick={() => {
+          navigator.clipboard.writeText(form.token).then(() => app.toast("密钥已复制", "ok")).catch((err) => app.toast(err.message, "bad"));
+        }}>复制密钥</Button>
       </div>
     </Card>
   );

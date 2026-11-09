@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { statusLabel } from "@/lib/utils";
+import { formatTime, statusLabel } from "@/lib/utils";
 import type { CommandLog, Preset } from "@/lib/types";
 import { Badge, Button, Card, Empty, PageHeader, statusTone, Textarea } from "@/components/ui";
 import { TargetPicker } from "@/components/targets";
@@ -17,7 +17,7 @@ export function Commands() {
 
 function RoomCommands() {
   const app = useApp();
-  const { devices } = useDevices();
+  const { devices, error: deviceError } = useDevices();
   const [presets, setPresets] = useState<Preset[]>([]);
   const [command, setCommand] = useState("hostname && uptime");
   const [mode, setMode] = useState<"online" | "picked">("online");
@@ -95,7 +95,7 @@ function RoomCommands() {
       <PageHeader title="命令" description="全部在线走一条广播；指定多台也只发一次请求，服务端一次性写入并投递。" />
       <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)]">
         <Card className="flex min-h-[520px] flex-col">
-          <TargetPicker devices={devices} mode={mode} onMode={setMode} selected={picked} onToggle={(id) => setPicked((list) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id])} onSet={setPicked} />
+          <TargetPicker devices={devices} error={deviceError} mode={mode} onMode={setMode} selected={picked} onToggle={(id) => setPicked((list) => list.includes(id) ? list.filter((item) => item !== id) : [...list, id])} onSet={setPicked} />
         </Card>
         <div className="space-y-4">
           <Card>
@@ -194,7 +194,7 @@ function History({ history, onOpen }: { history: (CommandLog & { room?: string }
         <tbody>
           {history.map((command) => (
             <tr key={(command.room || "") + command.id} className="cursor-pointer" onClick={() => onOpen(command.id)}>
-              <td className="whitespace-nowrap text-xs">{command.created_at}</td>
+              <td className="whitespace-nowrap text-xs">{formatTime(command.created_at)}</td>
               {history.some((item) => item.room) && <td>{command.room}</td>}
               <td>{command.target_type === "broadcast" ? "全部在线" : command.target_type === "list" ? "指定多台" : "#" + (command.target_id ?? "")}</td>
               <td className="max-w-sm truncate font-mono text-xs">{command.command}</td>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, apiRoomPath } from "@/lib/api";
-import { checkinLabel, formatBytes, parseIP, timeAgo } from "@/lib/utils";
+import { checkinLabel, formatBytes, formatDisk, formatGPU, formatTime, parseIP, timeAgo } from "@/lib/utils";
 import type { Device } from "@/lib/types";
 import { Badge, Button, Dialog, Empty, PageHeader } from "@/components/ui";
 import { FleetTable } from "@/components/fleet";
@@ -15,6 +15,14 @@ export function Devices() {
   const [term, setTerm] = useState<number | null>(null);
   const [query, setQuery] = useState("");
 
+  async function resetContest(roomIDs?: string[]) {
+    if (!(await app.confirm("赛事重置会清空设备记录与签到状态，已连接的机器会重新注册。确定继续？"))) return;
+    await api("/api/contest/reset", { method: "POST", body: JSON.stringify({ room_ids: roomIDs || [] }) });
+    app.toast("赛事重置已提交", "ok");
+    reload();
+    app.refreshRooms().catch(() => {});
+  }
+
   async function open(id: number) {
     const device = await api<Device>("/api/devices/" + id);
     setDetail(device);
@@ -26,6 +34,7 @@ export function Devices() {
       <div>
         <PageHeader title="全部设备" description="先勾选设备，再到命令、分发或电源页操作。编号只在同一机房内唯一。">
           <Button variant="outline" onClick={() => exportFleet(app.rooms)}>导出 CSV</Button>
+          <Button variant="destructive" onClick={() => resetContest()}>赛事重置</Button>
         </PageHeader>
         <FleetTable onManage={(room) => { app.setRoom(room); app.go("devices"); }} />
       </div>
@@ -42,12 +51,7 @@ export function Devices() {
       <PageHeader title="设备" description="点击一行查看硬件、签到和上下线记录。">
         <input className="h-9 rounded-md border border-border bg-card px-3 text-sm" placeholder="搜索" value={query} onChange={(event) => setQuery(event.target.value)} />
         <a className="inline-flex h-9 items-center rounded-md border border-border px-3 text-sm" href={apiRoomPath("/api/devices/export")}>导出 Excel</a>
-        <Button variant="destructive" onClick={async () => {
-          if (!(await app.confirm("将清空全部设备记录和编号。已连接的机器会重新注册。继续？"))) return;
-          await api("/api/devices/reset", { method: "POST" });
-          app.toast("已重置", "ok");
-          reload();
-        }}>重置编号</Button>
+        <Button variant="destructive" onClick={() => resetContest(app.cloud && app.roomID ? [app.roomID] : undefined)}>赛事重置</Button>
       </PageHeader>
       <div className="table-wrap">
         <table className="data">
@@ -85,17 +89,17 @@ export function Devices() {
               <Item k="内核" v={detail.kernel_release} />
               <Item k="CPU" v={detail.cpu_model} />
               <Item k="内存" v={formatBytes(detail.memory_total)} />
-              <Item k="GPU" v={detail.gpu_info} />
+              <Item k="GPU" v={formatGPU(detail.gpu_info)} />
               <Item k="MAC" v={detail.mac_address} />
               <Item k="选手" v={[detail.student_name, detail.student_num].filter(Boolean).join(" ")} />
               <Item k="最近在线" v={timeAgo(detail.last_seen)} />
-              <Item k="磁盘" v={detail.disk_info} />
+              <Item k="磁盘" v={formatDisk(detail.disk_info)} />
             </dl>
             <div className="table-wrap max-h-48">
               <table className="data">
                 <thead><tr><th>时间</th><th>事件</th><th>详情</th></tr></thead>
                 <tbody>
-                  {events.map((event) => <tr key={event.id}><td className="text-xs">{event.at}</td><td>{event.event}</td><td className="text-xs">{event.detail}</td></tr>)}
+                  {events.map((event) => <tr key={event.id}><td className="whitespace-nowrap text-xs">{formatTime(event.at)}</td><td>{eventLabel(event.event)}</td><td className="text-xs">{event.detail || "—"}</td></tr>)}
                   {!events.length && <tr><td colSpan={3}><Empty>没有事件</Empty></td></tr>}
                 </tbody>
               </table>
@@ -109,7 +113,14 @@ export function Devices() {
 }
 
 function Item({ k, v }: { k: string; v?: string }) {
-  return <div><dt className="text-xs text-muted-foreground">{k}</dt><dd className="truncate">{v || "—"}</dd></div>;
+  return <div className="min-w-0"><dt className="text-xs text-muted-foreground">{k}</dt><dd className="break-words">{v || "—"}</dd></div>;
+}
+
+function eventLabel(event: string) {
+  if (event === "online") return "上线";
+  if (event === "offline") return "下线";
+  if (event === "registered") return "注册";
+  return event || "—";
 }
 function pct(value?: number) { return value == null || value < 0 ? "—" : value.toFixed(0) + "%"; }
 

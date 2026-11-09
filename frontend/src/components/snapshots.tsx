@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { formatTime } from "@/lib/utils";
 import { Button, Card, Empty, Input } from "@/components/ui";
 import { useApp } from "@/state";
 
@@ -47,7 +48,7 @@ export function Snapshots() {
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
             <strong>{active.name}</strong>
-            <span className="text-muted-foreground">{active.created_at} · {active.op_count} 条</span>
+            <span className="text-muted-foreground">{formatTime(active.created_at)} · {active.op_count} 条</span>
             <Button size="sm" variant="outline" onClick={() => load()}>刷新</Button>
             <Button size="sm" variant="destructive" onClick={async () => {
               if (!(await app.confirm("结束后，新上线设备不再补执行这些操作。"))) return;
@@ -62,7 +63,7 @@ export function Snapshots() {
                 {ops.map((op) => (
                   <tr key={op.id}>
                     <td>{KINDS[op.kind] || op.kind}</td>
-                    <td className="max-w-md truncate">{op.summary}</td>
+                    <td className="max-w-md">{op.summary}</td>
                     <td>{op.delivered}</td>
                     <td><Button size="sm" variant="ghost" onClick={async () => {
                       if (!(await app.confirm("从队列移除后，之后上线的设备不再执行它。"))) return;

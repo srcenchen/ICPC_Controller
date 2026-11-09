@@ -10,6 +10,7 @@ export function TargetPicker({
   selected,
   onToggle,
   onSet,
+  error = "",
 }: {
   devices: Device[];
   mode: "online" | "picked";
@@ -17,6 +18,7 @@ export function TargetPicker({
   selected: number[];
   onToggle: (id: number) => void;
   onSet: (ids: number[]) => void;
+  error?: string;
 }) {
   const [query, setQuery] = useState("");
   const shown = useMemo(() => {
@@ -48,7 +50,7 @@ export function TargetPicker({
             <Badge tone={device.connected ? "ok" : "muted"}>{device.connected ? "在线" : "离线"}</Badge>
           </label>
         ))}
-        {!shown.length && <div className="p-6 text-center text-sm text-muted-foreground">没有匹配的设备</div>}
+        {!shown.length && <div className="p-6 text-center text-sm text-muted-foreground">{error || "没有匹配的设备"}</div>}
       </div>
     </div>
   );

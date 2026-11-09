@@ -54,6 +54,7 @@ export type Deployment = {
   node_id: string;
   room_name: string;
   cloud_url: string;
+  token?: string;
   token_set: boolean;
   allow_insecure: boolean;
   device_id_start: number;

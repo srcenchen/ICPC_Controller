@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { formatTime, statusLabel } from "@/lib/utils";
 import { Button, Card, Input, PageHeader, Select } from "@/components/ui";
 import { TargetPicker } from "@/components/targets";
 import { FleetTable, Jobs, queueFleet, useFleetDevices } from "@/components/fleet";
@@ -71,10 +72,10 @@ export function Power() {
               <tbody>
                 {schedules.map((item) => (
                   <tr key={item.id}>
-                    <td>{item.run_at}</td>
-                    <td>{item.action}</td>
+                    <td>{formatTime(item.run_at)}</td>
+                    <td>{item.action === "shutdown" ? "关机" : item.action === "reboot" ? "重启" : "唤醒"}</td>
                     <td>{item.target_type === "all" ? "全部" : (item.target_ids || []).map((id) => "#" + id).join(" ")}</td>
-                    <td>{item.status}{item.note ? " · " + item.note : ""}</td>
+                    <td>{statusLabel(item.status)}{item.note ? " · " + item.note : ""}</td>
                     <td><Button size="sm" variant="ghost" onClick={() => api("/api/power/schedules/" + item.id, { method: "DELETE" }).then(load)}>删除</Button></td>
                   </tr>
                 ))}

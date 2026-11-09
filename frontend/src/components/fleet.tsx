@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
-import { checkinLabel, deviceKey } from "@/lib/utils";
+import { checkinLabel, deviceKey, formatReceipt, formatTime, statusLabel } from "@/lib/utils";
 import type { Device } from "@/lib/types";
-import { Badge, Button, Empty, Input } from "@/components/ui";
+import { Badge, Button, Empty, Input, statusTone } from "@/components/ui";
 import { useApp } from "@/state";
 
 export type FleetDevice = Device & { room_id: string; room_name: string; key: string };
@@ -90,10 +90,10 @@ export function Jobs() {
         <tbody>
           {jobs.slice(0, 30).map((job) => (
             <tr key={job.id}>
-              <td className="whitespace-nowrap text-xs">{job.created_at}</td>
+              <td className="whitespace-nowrap text-xs">{formatTime(job.created_at)}</td>
               <td className="font-mono text-xs">{job.room_id.slice(0, 8)}</td>
-              <td>{job.status}</td>
-              <td className="max-w-xs truncate text-xs">{job.response}</td>
+              <td><Badge tone={statusTone(job.status)}>{statusLabel(job.status)}</Badge></td>
+              <td className="max-w-md text-sm">{formatReceipt(job.response)}</td>
               <td>{job.status === "queued" && <Button size="sm" variant="ghost" onClick={() => api("/api/cluster/jobs/" + job.id, { method: "DELETE" }).then(load)}>取消</Button>}</td>
             </tr>
           ))}

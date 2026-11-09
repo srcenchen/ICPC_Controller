@@ -54,6 +54,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [ask, setAsk] = useState<ConfirmState | null>(null);
   const [connected, setConnected] = useState(false);
   const listeners = useRef(new Set<(event: AdminEvent) => void>());
+  // Set before children render. An effect would run too late, and room pages
+  // would query the cloud's own empty device list.
+  setApiRoom(roomID);
 
   const toast = useCallback((text: string, tone: Toast["tone"] = "info") => {
     const id = Date.now() + Math.random();
@@ -80,8 +83,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const url = (id ? "/room/" + encodeURIComponent(id) : "/") + "#" + (location.hash.replace("#", "") || page);
     history.pushState(null, "", url);
   }, [page]);
-
-  useEffect(() => { setApiRoom(roomID); }, [roomID]);
 
   useEffect(() => {
     const sync = () => {
@@ -214,13 +215,21 @@ export function pageTitle(page: PageId) {
 }
 
 export function useDevices(reloadKey = 0) {
-  const { cloudAll, onAdmin } = useApp();
+  const { cloudAll, roomID, onAdmin } = useApp();
   const [devices, setDevices] = useState<Device[]>([]);
   const [error, setError] = useState("");
   const load = useCallback(() => {
-    if (cloudAll) return;
-    api<Device[]>("/api/devices").then(setDevices).catch((err) => setError(err.message));
-  }, [cloudAll]);
+    if (cloudAll) {
+      setDevices([]);
+      return;
+    }
+    api<Device[] | null>("/api/devices")
+      .then((list) => {
+        setDevices(Array.isArray(list) ? list : []);
+        setError("");
+      })
+      .catch((err) => setError(err.message));
+  }, [cloudAll, roomID]);
   useEffect(() => { load(); }, [load, reloadKey]);
   useEffect(() => onAdmin((event) => {
     if (["device_connected", "device_disconnected", "device_updated", "checkin_updated", "device_health"].includes(event.event)) load();

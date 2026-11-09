@@ -108,7 +108,7 @@ export function Broadcast() {
           </section>
           <section className="rounded-xl border border-border bg-card p-3 text-sm">
             <h2 className="mb-2 font-semibold">字体</h2>
-            <select className="mb-2 h-8 w-full rounded border border-border bg-background px-2" value={config?.active_font || ""} onChange={async (event) => { await api("/api/broadcast/config", { method: "PUT", body: JSON.stringify({ active_font: event.target.value }) }); load(); }}>
+            <select className="mb-2 h-8 w-full rounded border border-border bg-background px-2 text-foreground" value={config?.active_font || ""} onChange={async (event) => { await api("/api/broadcast/config", { method: "PUT", body: JSON.stringify({ active_font: event.target.value }) }); load(); }}>
               <option value="">默认无衬线</option>
               {fonts.map((font) => <option key={font.id} value={font.filename}>{font.name}</option>)}
             </select>

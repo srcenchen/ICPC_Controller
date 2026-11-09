@@ -1,3 +1,4 @@
+import { api } from "@/lib/api";
 import { Badge, Button, Card, Empty, PageHeader } from "@/components/ui";
 import { timeAgo } from "@/lib/utils";
 import { useApp } from "@/state";
@@ -35,7 +36,16 @@ export function Rooms() {
               </div>
               <div className="text-3xl font-semibold tabular-nums">{online}<span className="text-base font-normal text-muted-foreground"> / {room.devices.length}</span></div>
               <p className="mt-1 text-xs text-muted-foreground">最后上报 {timeAgo(room.last_seen)}{room.transfer_phase ? " · " + room.transfer_phase : ""}</p>
-              <Button className="mt-3" variant="outline" onClick={() => { app.setRoom(room.id); app.go("devices"); }}>进入机房</Button>
+              <div className="mt-3 flex gap-2">
+                <Button variant="outline" onClick={() => { app.setRoom(room.id); app.go("devices"); }}>进入机房</Button>
+                <Button variant="destructive" onClick={async () => {
+                  if (!(await app.confirm(`删除机房「${room.name}」？云端会通知该机房切换为单机模式；离线机房将在下次上线时收到通知。`))) return;
+                  await api("/api/cluster/rooms/" + encodeURIComponent(room.id), { method: "DELETE" });
+                  if (app.roomID === room.id) app.setRoom("");
+                  await app.refreshRooms();
+                  app.toast("已删除机房", "ok");
+                }}>删除机房</Button>
+              </div>
             </Card>
           );
         })}
