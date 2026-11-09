@@ -281,3 +281,130 @@ func TestRoomSnapshotIncludesDashboardCommandSummary(test *testing.T) {
 		test.Fatalf("wrong dashboard summary: %+v", snapshot)
 	}
 }
+
+func TestDeletedRoomIsNotifiedOnReconnect(test *testing.T) {
+	cloud := testFederation(test)
+	token := strings.Repeat("d", 32)
+	if err := cloud.settings.SetDeployment(DeploymentConfig{Mode: "cloud", Token: token, DeviceIDStart: 1}); err != nil {
+		test.Fatal(err)
+	}
+	roomID := uuid.NewString()
+	cloud.storeSnapshot(&RoomSnapshot{ID: roomID, Name: "离线机房"})
+	request := httptest.NewRequest("DELETE", "/api/cluster/rooms/"+roomID, nil)
+	request.SetPathValue("room", roomID)
+	recorder := httptest.NewRecorder()
+	cloud.DeleteRoom(recorder, request)
+	if recorder.Code != http.StatusOK {
+		test.Fatalf("delete room: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if !cloud.roomDeleted(roomID) {
+		test.Fatal("deletion marker missing")
+	}
+	server := httptest.NewServer(cloud.NodeAuth(http.NotFoundHandler()))
+	defer server.Close()
+	endpoint := strings.Replace(server.URL, "http://", "ws://", 1) + "/api/cluster/connect"
+	conn, _, err := websocket.DefaultDialer.Dial(endpoint, http.Header{"Authorization": []string{"Bearer " + token}})
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(FederationMessage{Type: "hello", Snapshot: &RoomSnapshot{ID: roomID, Name: "离线机房"}}); err != nil {
+		test.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var notice FederationMessage
+	if err := conn.ReadJSON(&notice); err != nil || notice.Type != "room_deleted" {
+		test.Fatalf("deleted room was not notified: %+v %v", notice, err)
+	}
+	if err := conn.WriteJSON(FederationMessage{Type: "room_deleted_ack", ID: notice.ID}); err != nil {
+		test.Fatal(err)
+	}
+	waitFor(test, func() bool { return !cloud.roomDeleted(roomID) })
+	rooms, _ := cloud.roomList()
+	if len(rooms) != 0 {
+		test.Fatalf("deleted room was re-added: %+v", rooms)
+	}
+}
+
+func TestRelaySwitchesToStandaloneAfterRoomDeletion(test *testing.T) {
+	cloud, relay := testFederation(test), testFederation(test)
+	token := strings.Repeat("e", 32)
+	if err := cloud.settings.SetDeployment(DeploymentConfig{Mode: "cloud", Token: token, DeviceIDStart: 1}); err != nil {
+		test.Fatal(err)
+	}
+	server := httptest.NewServer(cloud.NodeAuth(http.NotFoundHandler()))
+	defer server.Close()
+	if err := relay.settings.SetDeployment(DeploymentConfig{Mode: "relay", Token: token, DeviceIDStart: 1, RoomName: "在线机房", CloudURL: server.URL, AllowInsecure: true}); err != nil {
+		test.Fatal(err)
+	}
+	roomID := relay.settings.GetDeployment().NodeID
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	relay.Start(ctx, http.NotFoundHandler())
+	waitFor(test, func() bool {
+		rooms, _ := cloud.roomList()
+		return len(rooms) == 1 && rooms[0].Online
+	})
+	request := httptest.NewRequest("DELETE", "/api/cluster/rooms/"+roomID, nil)
+	request.SetPathValue("room", roomID)
+	cloud.DeleteRoom(httptest.NewRecorder(), request)
+	waitFor(test, func() bool {
+		cfg := relay.settings.GetDeployment()
+		return cfg.Mode == "standalone" && cfg.CloudURL == "" && cfg.Token == ""
+	})
+	waitFor(test, func() bool { return !cloud.roomDeleted(roomID) })
+	rooms, _ := cloud.roomList()
+	if len(rooms) != 0 {
+		test.Fatalf("deleted room still listed: %+v", rooms)
+	}
+}
+
+func TestContestResetQueuesEveryRoomAndClearsCache(test *testing.T) {
+	cloud := testFederation(test)
+	if err := cloud.settings.SetDeployment(DeploymentConfig{Mode: "cloud", Token: strings.Repeat("r", 32), DeviceIDStart: 1}); err != nil {
+		test.Fatal(err)
+	}
+	for _, name := range []string{"A", "B"} {
+		cloud.storeSnapshot(&RoomSnapshot{ID: uuid.NewString(), Name: name, Devices: []model.DeviceSummary{{AssignedID: 1, Hostname: name}}})
+	}
+	cloud.ResetContest(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/contest/reset", bytes.NewReader([]byte(`{}`))))
+	var jobs int
+	if err := cloud.db.QueryRow(`SELECT COUNT(*) FROM cluster_jobs WHERE status='queued'`).Scan(&jobs); err != nil || jobs != 2 {
+		test.Fatalf("expected reset job per room: %d %v", jobs, err)
+	}
+	rows, err := cloud.db.Query(`SELECT request, room_id FROM cluster_jobs`)
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw, roomID string
+		if err := rows.Scan(&raw, &roomID); err != nil {
+			test.Fatal(err)
+		}
+		var message FederationMessage
+		if err := json.Unmarshal([]byte(raw), &message); err != nil || message.Path != "/api/devices/reset" || message.Method != "POST" {
+			test.Fatalf("wrong reset job: %+v %v", message, err)
+		}
+	}
+	rooms, _ := cloud.roomList()
+	if len(rooms) != 2 {
+		test.Fatalf("rooms disappeared: %+v", rooms)
+	}
+	for _, room := range rooms {
+		if len(room.Devices) != 0 {
+			test.Fatalf("cached devices were not cleared: %+v", room.Devices)
+		}
+	}
+}
+
+func TestDeploymentTokenRemainsVisible(test *testing.T) {
+	settings := testFederation(test).settings
+	token := strings.Repeat("v", 32)
+	if err := settings.SetDeployment(DeploymentConfig{Mode: "cloud", Token: token, DeviceIDStart: 1}); err != nil {
+		test.Fatal(err)
+	}
+	if snapshot := settings.Snapshot(); snapshot.Deployment == nil || snapshot.Deployment.Token != token || !snapshot.Deployment.TokenSet {
+		test.Fatalf("token is no longer readable from settings: %+v", snapshot.Deployment)
+	}
+}

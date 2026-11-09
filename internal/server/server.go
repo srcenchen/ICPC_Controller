@@ -64,6 +64,8 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("GET /api/cluster/jobs", cfg.Federation.Jobs)
 		mux.HandleFunc("POST /api/cluster/broadcast", cfg.Federation.PublishBroadcast)
 		mux.HandleFunc("DELETE /api/cluster/jobs/{id}", cfg.Federation.CancelJob)
+		mux.HandleFunc("DELETE /api/cluster/rooms/{room}", cfg.Federation.DeleteRoom)
+		mux.HandleFunc("POST /api/contest/reset", cfg.Federation.ResetContest)
 		for _, method := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
 			mux.HandleFunc(method+" /api/cluster/rooms/{room}/proxy/{path...}", cfg.Federation.Proxy)
 		}
@@ -266,7 +268,7 @@ func (s *Server) Start() error {
 	if s.enableAvahi {
 		go s.startAvahi()
 	} else {
-		log.Println("[avahi] disabled by config")
+		log.Println("[avahi] disabled (default; use --avahi=true to publish icpc-server.local)")
 	}
 
 	quit := make(chan os.Signal, 1)
@@ -300,7 +302,8 @@ func (s *Server) startAvahi() {
 
 	ip := s.bindIP
 	if ip == "" {
-		ip = "0.0.0.0"
+		log.Println("[avahi] no bind IP configured, mDNS publishing disabled")
+		return
 	}
 	log.Printf("[avahi] publishing icpc-server.local on %s via mDNS", ip)
 	s.avahiCmd = exec.Command(path, "-a", "-R", "icpc-server.local", ip)

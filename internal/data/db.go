@@ -36,6 +36,7 @@ func NewDB(path string) (*sql.DB, error) {
 func migrate(db *sql.DB) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS cluster_rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, snapshot TEXT NOT NULL DEFAULT '{}', last_seen TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS cluster_deleted_rooms (id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS cluster_jobs (id TEXT PRIMARY KEY, room_id TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', response TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, sent_at TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS cluster_receipts (id TEXT PRIMARY KEY, status TEXT NOT NULL, response TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS devices (

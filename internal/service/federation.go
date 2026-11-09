@@ -142,7 +142,6 @@ func (federation *Federation) NodeAuth(next http.Handler) http.Handler {
 func (federation *Federation) Status(writer http.ResponseWriter, httpRequest *http.Request) {
 	cfg := federation.settings.GetDeployment()
 	cfg.TokenSet = cfg.Token != ""
-	cfg.Token = ""
 	federation.mu.Lock()
 	status := federation.linkStatus
 	federation.mu.Unlock()
@@ -169,6 +168,16 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 	}
 	room := hello.Snapshot
 	if _, err := uuid.Parse(room.ID); err != nil || strings.TrimSpace(room.Name) == "" || len(room.Name) > 100 {
+		return
+	}
+	if federation.roomDeleted(room.ID) {
+		notice := &relayConnection{conn: conn}
+		_ = notice.send(FederationMessage{Type: "room_deleted", Body: []byte("该机房已被云端删除，请切换为单机模式")})
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var ack FederationMessage
+		if conn.ReadJSON(&ack) == nil && ack.Type == "room_deleted_ack" {
+			federation.completeRoomDeletion(room.ID)
+		}
 		return
 	}
 	connection := &relayConnection{conn: conn}
@@ -203,6 +212,11 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 			return
 		}
 		switch message.Type {
+		case "room_deleted_ack":
+			if federation.roomDeleted(room.ID) {
+				federation.completeRoomDeletion(room.ID)
+				return
+			}
 		case "terminal_output", "terminal_closed":
 			federation.mu.Lock()
 			stream := federation.terminals[room.ID+":"+message.ID]
@@ -261,6 +275,9 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 }
 
 func (federation *Federation) storeSnapshot(room *RoomSnapshot) {
+	if federation.roomDeleted(room.ID) {
+		return
+	}
 	if room.Devices == nil {
 		room.Devices = []model.DeviceSummary{}
 	}
@@ -487,6 +504,14 @@ func (federation *Federation) runRelay(ctx context.Context, cfg DeploymentConfig
 		if request.Type == "rejected" {
 			federation.mu.Lock()
 			federation.linkStatus = "云端拒绝：" + string(request.Body)
+			federation.mu.Unlock()
+			return
+		}
+		if request.Type == "room_deleted" {
+			_ = federation.settings.LeaveCloud()
+			_ = connection.send(FederationMessage{Type: "room_deleted_ack", ID: request.ID})
+			federation.mu.Lock()
+			federation.linkStatus = "机房已被云端删除，已切换为单机模式"
 			federation.mu.Unlock()
 			return
 		}
@@ -771,6 +796,164 @@ func (federation *Federation) ServeFile(writer http.ResponseWriter, httpRequest 
 		return
 	}
 	http.ServeFile(writer, httpRequest, path)
+}
+
+// roomDeleted reports whether a room was explicitly deleted from this cloud.
+func (federation *Federation) roomDeleted(roomID string) bool {
+	var count int
+	return federation.db.QueryRow(`SELECT COUNT(*) FROM cluster_deleted_rooms WHERE id=?`, roomID).Scan(&count) == nil && count > 0
+}
+
+// completeRoomDeletion removes the tombstone and any state that a late
+// snapshot may have re-created while the room was being notified.
+func (federation *Federation) completeRoomDeletion(roomID string) {
+	_, _ = federation.db.Exec(`DELETE FROM cluster_deleted_rooms WHERE id=?`, roomID)
+	_, _ = federation.db.Exec(`DELETE FROM cluster_rooms WHERE id=?`, roomID)
+	_, _ = federation.db.Exec(`DELETE FROM cluster_jobs WHERE room_id=?`, roomID)
+}
+
+// DeleteRoom removes a room from the cloud and asks its relay to fall back to
+// standalone mode. If the room is offline the tombstone stays in place and the
+// notice is delivered the next time that room connects.
+func (federation *Federation) DeleteRoom(writer http.ResponseWriter, httpRequest *http.Request) {
+	if federation.settings.GetDeployment().Mode != "cloud" {
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "需要云端模式"})
+		return
+	}
+	roomID := httpRequest.PathValue("room")
+	if _, err := uuid.Parse(roomID); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "无效的机房身份"})
+		return
+	}
+	tx, err := federation.db.Begin()
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := tx.Exec(`INSERT INTO cluster_deleted_rooms(id,deleted_at) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET deleted_at=excluded.deleted_at`, roomID, now); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM cluster_rooms WHERE id=?`, roomID); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM cluster_jobs WHERE room_id=?`, roomID); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	federation.mu.Lock()
+	connection := federation.connections[roomID]
+	federation.mu.Unlock()
+	if connection != nil {
+		_ = connection.send(FederationMessage{Type: "room_deleted", Body: []byte("该机房已被云端删除，请切换为单机模式")})
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"message": "机房已删除；离线机房会在下次上线时收到通知"})
+}
+
+// ResetContest clears device records and check-in state. On a cloud it queues
+// the same reset for every (or the explicitly selected) room so offline rooms
+// apply it when they reconnect.
+func (federation *Federation) ResetContest(writer http.ResponseWriter, httpRequest *http.Request) {
+	var body struct {
+		RoomIDs []string `json:"room_ids"`
+	}
+	if httpRequest.Body != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(writer, httpRequest.Body, 1<<20)).Decode(&body); err != nil && err != io.EOF {
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			return
+		}
+	}
+	rooms := make([]string, 0)
+	var jobIDs []string
+	if federation.settings.GetDeployment().Mode == "cloud" {
+		known, err := federation.allRoomIDs()
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if len(body.RoomIDs) > 0 {
+			knownSet := make(map[string]bool, len(known))
+			for _, id := range known {
+				knownSet[id] = true
+			}
+			seen := make(map[string]bool, len(body.RoomIDs))
+			for _, id := range body.RoomIDs {
+				if !knownSet[id] {
+					writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "未知机房"})
+					return
+				}
+				if !seen[id] {
+					seen[id] = true
+					rooms = append(rooms, id)
+				}
+			}
+		} else {
+			rooms = known
+		}
+		tx, err := federation.db.Begin()
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		defer tx.Rollback()
+		createdAt := time.Now().UTC().Format(time.RFC3339Nano)
+		jobIDs = make([]string, 0, len(rooms))
+		for _, room := range rooms {
+			message := FederationMessage{Type: "request", ID: uuid.NewString(), Method: "POST", Path: "/api/devices/reset"}
+			raw, _ := json.Marshal(message)
+			if _, err := tx.Exec(`INSERT INTO cluster_jobs(id,room_id,request,created_at) VALUES(?,?,?,?)`, message.ID, room, string(raw), createdAt); err != nil {
+				writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			jobIDs = append(jobIDs, message.ID)
+		}
+		if err := tx.Commit(); err != nil {
+			writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		for _, room := range rooms {
+			federation.clearStoredRoomDevices(room)
+		}
+	}
+	if err := federation.devices.ResetAll(); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	federation.hub.KickAll()
+	if len(jobIDs) > 0 {
+		federation.deliverJobs()
+	}
+	writeJSON(writer, http.StatusOK, map[string]interface{}{
+		"message": "赛事重置已执行；设备与签到状态已清空",
+		"rooms":   len(rooms),
+		"job_ids": jobIDs,
+	})
+}
+
+// clearStoredRoomDevices blanks the cached device list of a room so the cloud
+// dashboard reflects a contest reset before the room sends its next snapshot.
+func (federation *Federation) clearStoredRoomDevices(roomID string) {
+	var raw string
+	if federation.db.QueryRow(`SELECT snapshot FROM cluster_rooms WHERE id=?`, roomID).Scan(&raw) != nil {
+		return
+	}
+	var room RoomSnapshot
+	if json.Unmarshal([]byte(raw), &room) != nil {
+		return
+	}
+	room.Devices = []model.DeviceSummary{}
+	data, err := json.Marshal(room)
+	if err != nil {
+		return
+	}
+	_, _ = federation.db.Exec(`UPDATE cluster_rooms SET snapshot=? WHERE id=?`, string(data), roomID)
 }
 
 func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *http.Request) {

@@ -71,6 +71,33 @@ func (settings *ServerSettings) SetDeployment(cfg DeploymentConfig) error {
 	return nil
 }
 
+// LeaveCloud switches this machine back to standalone mode after the cloud
+// deleted its room. Cloud credentials and room metadata are cleared so the
+// relay does not try to reconnect on its own.
+func (settings *ServerSettings) LeaveCloud() error {
+	settings.mu.Lock()
+	defer settings.mu.Unlock()
+	cfg := settings.deployment
+	cfg.Mode = "standalone"
+	cfg.RoomName = ""
+	cfg.CloudURL = ""
+	cfg.Token = ""
+	cfg.TokenSet = false
+	cfg.AllowInsecure = false
+	cfg.AdvertiseIP = ""
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if settings.settingsRepo != nil {
+		if err := settings.settingsRepo.SetMany(map[string]string{"deployment": string(raw), "device_id_start": fmt.Sprint(cfg.DeviceIDStart)}); err != nil {
+			return err
+		}
+	}
+	settings.deployment = cfg
+	return nil
+}
+
 func (settings *ServerSettings) loadDeployment() {
 	settings.deployment = DeploymentConfig{Mode: "standalone", NodeID: uuid.NewString(), DeviceIDStart: 1}
 	if settings.settingsRepo != nil {

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"syscall"
 
@@ -14,21 +15,43 @@ import (
 )
 
 func main() {
-	port := flag.String("port", "8080", "HTTP server port")
-	tcpPort := flag.String("tcp-port", "8081", "TCP port for client connections")
-	p2pPort := flag.String("p2p-port", "48080", "local P2P sender port")
-	dbPath := flag.String("db", "icpc.db", "SQLite database path")
-	bind := flag.String("bind", "", "IP address for avahi mDNS (auto-detect if empty)")
-	avahi := flag.Bool("avahi", true, "enable avahi mDNS publishing")
-	listIfaces := flag.Bool("list-interfaces", false, "list available network interfaces and exit")
-	hostnamePrefix := flag.String("hostname-prefix", "cwxu-icpc", "hostname prefix for client machines (e.g. 'cwxu-icpc' → 'cwxu-icpc-1')")
-	restore := flag.String("restore", "", "restore a verified backup ZIP while the server is stopped, then exit")
+	port := flag.String("port", "8080", "HTTP 服务端口")
+	tcpPort := flag.String("tcp-port", "8081", "选手机控制 TCP 端口")
+	p2pPort := flag.String("p2p-port", "48080", "本地 P2P 发送端口")
+	dbPath := flag.String("db", "icpc.db", "SQLite 数据库路径")
+	bind := flag.String("bind", "", "mDNS 发布使用的本机 IP（启用 --avahi=true 时必填）")
+	avahi := flag.Bool("avahi", false, "是否启用 avahi mDNS 发布 icpc-server.local（默认关闭；启用时必须用 --bind 指定 IP）")
+	listIfaces := flag.Bool("list-interfaces", false, "列出可用网络接口及其 IP 后退出")
+	hostnamePrefix := flag.String("hostname-prefix", "cwxu-icpc", "选手机主机名前缀（例如 'cwxu-icpc' → 'cwxu-icpc-1'）")
+	restore := flag.String("restore", "", "在服务停止时恢复已验证的备份 ZIP，然后退出")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "用法：%s [参数]\n\n参数：\n", os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	if *listIfaces {
 		server.ListInterfaces()
 		os.Exit(0)
 	}
+	bindIP := *bind
+	if *avahi {
+		if bindIP == "" {
+			fmt.Fprintln(os.Stderr, "错误：启用 mDNS（--avahi=true）时必须通过 --bind 指定本机 IP，例如：--bind 192.168.1.10")
+			fmt.Fprintln(os.Stderr, "可用 --list-interfaces 查看网卡地址。")
+			os.Exit(1)
+		}
+		ip := net.ParseIP(bindIP)
+		if ip == nil || ip.IsUnspecified() {
+			fmt.Fprintf(os.Stderr, "错误：--bind %q 不是可用的具体 IP 地址（不能是 0.0.0.0 或 ::）。\n", bindIP)
+			fmt.Fprintln(os.Stderr, "可用 --list-interfaces 查看网卡地址。")
+			os.Exit(1)
+		}
+		log.Printf("[main] mDNS 发布地址：%s", bindIP)
+	} else {
+		log.Println("[main] 未启用 mDNS（--avahi 默认关闭）")
+	}
+
 	lockFile, err := os.OpenFile(*dbPath+".lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		log.Fatal(err)
@@ -43,19 +66,6 @@ func main() {
 		}
 		log.Println("backup restored; previous database and data retained with .pre-restore suffix; restart the server")
 		return
-	}
-
-	bindIP := *bind
-	if bindIP == "" {
-		bindIP = server.AutoDetectIP()
-		if bindIP == "0.0.0.0" && *avahi {
-			fmt.Println("Multiple or no network interfaces detected. Use --list-interfaces to see options.")
-			fmt.Println("Specify --bind <ip> for mDNS publishing, or --avahi=false to disable.")
-		} else {
-			log.Printf("[main] auto-detected bind IP: %s", bindIP)
-		}
-	} else {
-		log.Printf("[main] using specified bind IP: %s", bindIP)
 	}
 
 	db, err := data.NewDB(*dbPath)

@@ -1,6 +1,7 @@
 # Binaries
 /client
 /server
+/icpc-server
 *.exe
 *.test
 *.out

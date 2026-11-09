@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ICPC 无锡学院 Linux 集控系统 — a centralized remote control system for managing Linux contestant machines in ICPC (competitive programming) competitions.
 
-- **Server**: Deployed on Linux, publishes via Avahi mDNS (`icpc-server.local`), provides a web UI
+- **Server**: Deployed on Linux, optionally publishes via Avahi mDNS (`icpc-server.local`, disabled by default; enable with `--avahi=true`), provides a web UI
 - **Client (选手机)**: Contestant machines running as root, connect to server, report system info, accept remote commands
 
 ## Tech Stack
@@ -53,7 +53,7 @@ go test -run TestName ./internal/...
 ## Key Requirements (from 需求.md)
 
 ### Server
-1. On startup, publish via `avahi-publish -a -R icpc-server.local 0.0.0.0` for mDNS discovery
+1. When started with `--avahi=true --bind <local-ip>`, publish via `avahi-publish -a -R icpc-server.local <local-ip>` for mDNS discovery (default is off, and `--bind` is required when enabled)
 2. Maintain persistent long connections to all client machines with automatic reconnection
 3. Assign each client an incremental numeric ID (starting from 1); client renames its hostname to this ID
 4. Store client machine info (hardware specs, OS details, etc.) in SQLite3

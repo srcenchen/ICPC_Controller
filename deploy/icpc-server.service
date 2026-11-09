@@ -11,6 +11,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/icpc
+# ExecStart: 默认不启用 mDNS。如需让选手机自动发现，先执行
+# /opt/icpc/icpc-server --list-interfaces 查看 IP，再改为：
+#   ExecStart=/opt/icpc/icpc-server ... --avahi=true --bind <本机IP>
 ExecStart=/opt/icpc/icpc-server --port 8080 --tcp-port 8081 --db /opt/icpc/icpc.db
 Restart=always
 RestartSec=3

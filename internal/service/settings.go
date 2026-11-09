@@ -339,7 +339,6 @@ func (s *ServerSettings) Snapshot() ServerSettings {
 	copy(rules, s.NetworkRules)
 	deployment := s.deployment
 	deployment.TokenSet = deployment.Token != ""
-	deployment.Token = ""
 	return ServerSettings{
 		Deployment:           &deployment,
 		HostnamePrefix:       s.HostnamePrefix,
