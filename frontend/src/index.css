@@ -3,43 +3,43 @@
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
 :root {
-  --background: 40 23% 97%;
-  --foreground: 200 18% 12%;
+  --background: 220 20% 98%;
+  --foreground: 222 22% 14%;
   --card: 0 0% 100%;
-  --card-foreground: 200 18% 12%;
-  --muted: 40 14% 93%;
-  --muted-foreground: 200 8% 38%;
-  --border: 36 12% 86%;
-  --primary: 174 72% 24%;
-  --primary-foreground: 160 40% 98%;
-  --destructive: 4 72% 42%;
+  --card-foreground: 222 22% 14%;
+  --muted: 220 16% 95%;
+  --muted-foreground: 220 8% 40%;
+  --border: 220 14% 89%;
+  --primary: 221 76% 40%;
+  --primary-foreground: 0 0% 100%;
+  --destructive: 0 72% 42%;
   --destructive-foreground: 0 0% 100%;
-  --ring: 174 72% 24%;
-  --sidebar: 198 22% 11%;
-  --sidebar-foreground: 40 20% 94%;
-  --warning: 28 90% 42%;
-  --ok: 152 55% 32%;
+  --ring: 221 76% 40%;
+  --sidebar: 220 18% 96%;
+  --sidebar-foreground: 222 16% 22%;
+  --warning: 28 82% 36%;
+  --ok: 152 42% 32%;
   --radius: 0.75rem;
   color-scheme: light;
 }
 
 [data-theme="dark"] {
-  --background: 210 16% 8%;
-  --foreground: 40 18% 94%;
-  --card: 210 14% 11%;
-  --card-foreground: 40 18% 94%;
-  --muted: 210 12% 16%;
-  --muted-foreground: 210 8% 70%;
-  --border: 210 10% 20%;
-  --primary: 168 52% 46%;
-  --primary-foreground: 200 24% 8%;
-  --destructive: 0 68% 58%;
+  --background: 222 16% 9%;
+  --foreground: 214 18% 94%;
+  --card: 222 14% 12%;
+  --card-foreground: 214 18% 94%;
+  --muted: 222 12% 17%;
+  --muted-foreground: 215 10% 70%;
+  --border: 222 10% 22%;
+  --primary: 221 72% 52%;
+  --primary-foreground: 0 0% 100%;
+  --destructive: 0 68% 52%;
   --destructive-foreground: 0 0% 100%;
-  --ring: 168 52% 46%;
-  --sidebar: 210 18% 6%;
-  --sidebar-foreground: 40 16% 92%;
-  --warning: 32 90% 58%;
-  --ok: 152 46% 52%;
+  --ring: 221 72% 52%;
+  --sidebar: 222 18% 8%;
+  --sidebar-foreground: 214 14% 90%;
+  --warning: 28 78% 42%;
+  --ok: 152 42% 42%;
   color-scheme: dark;
 }
 
@@ -75,7 +75,7 @@ body {
   font-size: 14px;
   line-height: 1.5;
 }
-button, input, select, textarea { font: inherit; color: inherit; }
+button, input, select, textarea { font: inherit; }
 code, .mono { font-family: var(--font-mono); }
 
 .table-wrap { overflow: auto; border: 1px solid hsl(var(--border)); border-radius: var(--radius); background: hsl(var(--card)); }

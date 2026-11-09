@@ -46,7 +46,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full min-h-screen bg-background">
       {open && <button className="fixed inset-0 z-30 bg-black/40 md:hidden" aria-label="关闭菜单" onClick={() => setOpen(false)} />}
-      <aside className={cn("fixed z-40 flex h-full w-60 shrink-0 flex-col bg-sidebar text-sidebar-foreground transition-transform md:static md:translate-x-0", open ? "translate-x-0" : "-translate-x-full")}>
+      <aside className={cn("fixed z-40 flex h-full w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground transition-transform md:static md:translate-x-0", open ? "translate-x-0" : "-translate-x-full")}>
         <div className="flex items-center gap-2 px-4 py-4">
           <span className="grid h-8 w-8 place-items-center rounded-md bg-primary text-xs font-bold text-primary-foreground">IC</span>
           <div>
@@ -57,14 +57,14 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 overflow-auto px-2 pb-4">
           {groups.map((group) => (
             <div key={group} className="mb-3">
-              <div className="px-2 pb-1 text-[11px] font-medium uppercase tracking-wider text-sidebar-foreground/45">{group}</div>
+              <div className="px-2 pb-1 text-[11px] font-medium uppercase tracking-wider text-sidebar-foreground/70">{group}</div>
               {NAV.filter((item) => item.group === group && (!item.cloudOnly || app.cloud)).map((item) => {
                 const Icon = item.icon;
                 const active = app.page === item.id;
                 return (
                   <button
                     key={item.id}
-                    className={cn("mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm", active ? "bg-white/10 text-white" : "text-sidebar-foreground/80 hover:bg-white/5")}
+                    className={cn("mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm", active ? "bg-primary/10 font-medium text-primary" : "text-sidebar-foreground/80 hover:bg-muted")}
                     onClick={() => { app.go(item.id); setOpen(false); }}
                   >
                     <Icon className="h-4 w-4" />
@@ -75,7 +75,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
           ))}
         </nav>
-        <button className="m-2 flex items-center gap-2 rounded-md px-2 py-2 text-sm text-sidebar-foreground/80 hover:bg-white/5" onClick={logout}>
+        <button className="m-2 flex items-center gap-2 rounded-md px-2 py-2 text-sm text-sidebar-foreground/80 hover:bg-muted" onClick={logout}>
           <LogOut className="h-4 w-4" />退出
         </button>
       </aside>
@@ -89,7 +89,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           {app.cloud && (
-            <select className="h-9 max-w-[220px] rounded-md border border-border bg-card px-2 text-sm" aria-label="管理范围" value={app.roomID} onChange={(event) => app.setRoom(event.target.value)}>
+            <select className="h-9 max-w-[220px] rounded-md border border-border bg-card px-2 text-sm text-foreground" aria-label="管理范围" value={app.roomID} onChange={(event) => app.setRoom(event.target.value)}>
               <option value="">全部机房</option>
               {app.rooms.map((room) => <option key={room.id} value={room.id}>{room.name}{room.online ? "" : " · 离线"}</option>)}
             </select>

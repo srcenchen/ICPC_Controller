@@ -7,9 +7,9 @@ export function Login() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   return (
-    <div className="grid min-h-screen place-items-center bg-sidebar px-4">
+    <div className="grid min-h-screen place-items-center bg-background px-4">
       <form
-        className="w-full max-w-sm rounded-2xl border border-white/10 bg-card p-8 text-card-foreground shadow-2xl"
+        className="w-full max-w-sm rounded-2xl border border-border bg-card p-8 text-card-foreground shadow-lg"
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
