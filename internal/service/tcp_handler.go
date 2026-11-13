@@ -373,7 +373,7 @@ func (h *TCPHandler) Handle(conn net.Conn) {
 				log.Printf("[tcp] device %d: unmarshal terminal_closed: %v", assignedID, err)
 				continue
 			}
-			TerminalHub.Broadcast(msg.SessionID, []byte("\x1b[31mSession closed\x1b[0m\r\n"))
+			TerminalHub.Broadcast(msg.SessionID, []byte("\r\n\x1b[31m终端会话已结束\x1b[0m\r\n"))
 			TerminalHub.Close(msg.SessionID)
 
 		case "query_broadcast_state":

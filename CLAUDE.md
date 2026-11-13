@@ -6,87 +6,63 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ICPC 无锡学院 Linux 集控系统 — a centralized remote control system for managing Linux contestant machines in ICPC (competitive programming) competitions.
 
-- **Server**: Deployed on Linux, optionally publishes via Avahi mDNS (`icpc-server.local`, disabled by default; enable with `--avahi=true`), provides a web UI
-- **Client (选手机)**: Contestant machines running as root, connect to server, report system info, accept remote commands
+- **Server (`./cmd/server`)**: Single-binary Go server with embedded web console. Supports **Standalone (单机)**, **Relay (并机/机房中转)**, and **Cloud (云端汇总)** deployment modes. Optionally publishes `icpc-server.local` via Avahi mDNS (`--avahi=true --bind <ip>`, disabled by default).
+- **Client (`./cmd/client`, 选手机)**: Runs as root on Linux contestant machines, registers via hardware UUID + MAC fingerprint, reports hardware/health telemetry, executes commands, opens PTY remote terminals, serves X11 screen captures/watermarks, performs P2P file distribution with SHA-256 receipts, and provides local check-in + DOMjudge attendance endpoints (`127.0.0.1:8090`).
 
 ## Tech Stack
 
-- Go 1.26 backend
-- SQLite3 (pure Go, no CGo — likely `modernc.org/sqlite` or similar)
-- jQuery frontend embedded in the Go server binary (single-binary deployment)
+- **Backend**: Go 1.26 (`modernc.org/sqlite` pure-Go SQLite3, `gorilla/websocket`, `creack/pty`, `jezek/xgb`, `excelize/v2`)
+- **P2P Engine**: `pkg/go-silver-core` (local module replaced in `go.mod`)
+- **Frontend**: Vue 3 + TypeScript + Vite + Element Plus + `@xterm/xterm` + `highlight.js` (`frontend/`), built into `internal/server/web/` and embedded via `//go:embed web/*`
 
-## Directory Structure (planned)
+## Directory Structure
 
-```
+```text
 cmd/
-  server.go    — server entrypoint
-  client.go    — client (contestant machine) entrypoint
+  server/main.go        — server entrypoint (--port 8080, --tcp-port 8081, --p2p-port 48080, --db icpc.db)
+  client/               — Linux contestant client (main, screen, watermark, x11env, distribution, health, update, judge_bridge)
 internal/
-  biz/         — business logic layer
-  data/        — data access / repository layer
-  model/       — data models / structs
-  server/      — HTTP server, API handlers, embedded frontend
-  service/     — service layer (orchestration between biz/data)
+  biz/                  — hub connection registry, atomic ID/identity assignment, command dispatcher, janitor
+  data/                 — SQLite schema/migrations, repositories, VACUUM INTO backup & restore
+  model/                — protocol messages, device/fastfetch models, command/broadcast models
+  server/               — HTTP mux, middleware, Avahi lifecycle, embedded web/ static assets
+  service/              — REST/WS handlers, TCP client protocol, terminal hub, screen proxy, federation, P2P distribution, snapshots
+frontend/
+  src/
+    lib/                — API client & room proxy resolver, reactive store, frame concurrency pool, search/format helpers
+    components/         — DeviceDrawer, TerminalDialog, ScreenTile/ScreenDialog, TargetPicker, CodeEditor, FleetTable, JobsTable, SnapshotsCard
+    pages/              — Login, Dashboard, Rooms, Devices, Screen, Commands, Distribute, Network, Power, Checkin, Broadcast, Settings
+pkg/
+  go-silver-core/       — chunked P2P file distribution library and protocol tests
 ```
 
-Standard Go project layout following clean architecture conventions.
-
-## Commands
+## Build & Test Commands
 
 ```bash
-# Build
-go build ./...
+# Build frontend into internal/server/web/ (always run after editing frontend/)
+make ui
 
-# Run server
-go run ./cmd/server.go
+# Build server and client binaries
+make build
 
-# Run client
-go run ./cmd/client.go
+# Cross-compile Linux amd64 client
+make client-linux
 
-# Run tests
-go test ./...
+# Run Go vet and all unit/integration tests
+go vet ./...
+go test -race ./...
 
-# Run a single test
-go test -run TestName ./internal/...
+# Run go-silver-core P2P & protocol tests
+make test-p2p
+
+# Run a single Go test
+go test -race -run TestName ./internal/service
 ```
 
-## Key Requirements (from 需求.md)
+## Key Architectural Notes
 
-### Server
-1. When started with `--avahi=true --bind <local-ip>`, publish via `avahi-publish -a -R icpc-server.local <local-ip>` for mDNS discovery (default is off, and `--bind` is required when enabled)
-2. Maintain persistent long connections to all client machines with automatic reconnection
-3. Assign each client an incremental numeric ID (starting from 1); client renames its hostname to this ID
-4. Store client machine info (hardware specs, OS details, etc.) in SQLite3
-5. Web UI with jQuery providing:
-   - **Dashboard** — current device status overview
-   - **Device Management** — device list with summaries, click for full details
-   - **Command Execution** — send commands to clients, with syntax-highlighted input
-
-### Client (选手机)
-1. Runs as **root**
-2. Discovers server via `icpc-server.local` (mDNS), with fallback: reads `~/server` file for a direct IP if the file is non-empty
-3. On first connection, requests an ID from the server, then renames its hostname to that ID
-4. Collects system specs via `fastfetch --format json > /tmp/spec.json` and reports to server
-5. Maintains a persistent long connection with reconnection logic
-6. Accepts and executes commands from the server (file-based or direct commands)
-
-### fastfetch JSON Output
-
-The `fastfetch --format json` output is a JSON array of typed objects (`Title`, `OS`, `Host`, `Kernel`, `CPU`, `GPU`, `Memory`, `Disk`, `LocalIp`, `DE`, `WM`, etc.). The model layer should define structs to parse relevant fields from this output. See `需求.md` lines 16-363 for the full example schema.
-
-### Client ID Assignment
-
-- IDs are monotonically incrementing integers starting from 1
-- When a client connects, the server assigns the next available ID
-- The client then renames its hostname to `cwxu-icpc-{ID}` (e.g., `cwxu-icpc-1`, `cwxu-icpc-2`, ...)
-
-## Data Model Highlights
-
-Key entities the system tracks per client machine:
-- ID (assigned by server)
-- Hostname, username
-- OS info (name, version, kernel)
-- Hardware (CPU model/cores, GPU, total memory, disk layout)
-- Network (IP addresses, interfaces)
-- Connection status (online/offline)
-- Shell, DE/WM info
+- **Embedded Frontend**: Editing files in `frontend/` does NOT affect the Go binary until `make ui` (or `cd frontend && npm run build`) regenerates `internal/server/web/`. Note that `internal/server/web/broadcast/` holds the standalone contestant display pages (`before.html`, `contesting.html`, `after.html`) — keep `emptyOutDir: false` in `vite.config.ts` so broadcast display pages are preserved.
+- **Screen Wall Concurrency**: Browsers cap HTTP/1.1 connections per origin at ~6. Grid tiles MUST fetch single JPEG snapshots (`?hd=0&single=1`) through `frontend/src/lib/framePool.ts` (never open unbounded `multipart/x-mixed-replace` streams in a grid). Only the single enlarged `ScreenDialog` opens a live MJPEG stream, and it explicitly resets `img.src` before unmounting so Chromium releases the socket immediately. On the server, `ScreenProxyHandler` coalesces concurrent thumbnail requests and caches frames briefly.
+- **Interactive Terminal**: Each browser WebSocket connection to `/ws/terminal/{id}` gets a unique session ID (`term_<id>_<uuid>`) and is the sole writer on its `websocket.Conn` via `TerminalHub.SubscribeStream`. Keystrokes are sent as binary WebSocket frames; resize events (`{"type":"resize","cols":...,"rows":...}`) are sent as text frames so pasting JSON into the terminal is never mistaken for a control message.
+- **Cloud Room Proxy**: When `store.roomID` is set in Cloud mode, `frontend/src/lib/api.ts` rewrites room-scoped endpoints to `/api/cluster/rooms/{room}/proxy/...` (validated by `allowedRelayRequest` in `internal/service/federation.go`).
+- **Default Contestant Save Directory**: File distribution defaults `save_dir` to `/home/cwxu/桌面`.

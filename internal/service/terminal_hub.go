@@ -1,43 +1,15 @@
 package service
 
 import (
-	"log"
 	"sync"
-	"time"
-
-	"github.com/gorilla/websocket"
 )
 
-// TerminalSession holds browser WebSocket connections for a terminal session.
+// TerminalSession fans terminal output out to subscriber channels. Subscribers
+// (browser handlers, cloud relays) own their sockets and are the only writers
+// on them, so the TCP read loop never blocks on, or races with, a WebSocket.
 type TerminalSession struct {
-	Conns   map[*websocket.Conn]bool
 	Streams map[chan []byte]bool
 	Mu      sync.Mutex
-}
-
-func (h *TerminalHubManager) SubscribeStream(sessionID string) (<-chan []byte, func()) {
-	h.Mu.Lock()
-	session := h.Sessions[sessionID]
-	if session == nil {
-		session = &TerminalSession{Conns: make(map[*websocket.Conn]bool)}
-		h.Sessions[sessionID] = session
-	}
-	h.Mu.Unlock()
-	stream := make(chan []byte, 128)
-	session.Mu.Lock()
-	if session.Streams == nil {
-		session.Streams = make(map[chan []byte]bool)
-	}
-	session.Streams[stream] = true
-	session.Mu.Unlock()
-	return stream, func() {
-		session.Mu.Lock()
-		if session.Streams[stream] {
-			delete(session.Streams, stream)
-			close(stream)
-		}
-		session.Mu.Unlock()
-	}
 }
 
 // TerminalHubManager manages terminal sessions identified by session ID.
@@ -50,36 +22,36 @@ var TerminalHub = &TerminalHubManager{
 	Sessions: make(map[string]*TerminalSession),
 }
 
-// Subscribe adds a browser WS connection to a terminal session.
-func (h *TerminalHubManager) Subscribe(sessionID string, conn *websocket.Conn) {
+// terminalStreamBuffer is generous so bursts (e.g. `cat` of a large file) do
+// not drop a viewer; a subscriber that still falls behind is disconnected.
+const terminalStreamBuffer = 1024
+
+// SubscribeStream registers a channel that receives every output chunk of the
+// session. The returned func unsubscribes; the channel is closed when the
+// session ends or the subscriber is too slow.
+func (h *TerminalHubManager) SubscribeStream(sessionID string) (<-chan []byte, func()) {
 	h.Mu.Lock()
-	s, ok := h.Sessions[sessionID]
-	if !ok {
-		s = &TerminalSession{Conns: make(map[*websocket.Conn]bool)}
-		h.Sessions[sessionID] = s
+	session := h.Sessions[sessionID]
+	if session == nil {
+		session = &TerminalSession{Streams: make(map[chan []byte]bool)}
+		h.Sessions[sessionID] = session
 	}
 	h.Mu.Unlock()
-
-	s.Mu.Lock()
-	s.Conns[conn] = true
-	s.Mu.Unlock()
-	log.Printf("[terminal] %s: browser subscribed (%d listeners)", sessionID, len(s.Conns))
-}
-
-// Unsubscribe removes a browser WS connection from a terminal session.
-func (h *TerminalHubManager) Unsubscribe(sessionID string, conn *websocket.Conn) {
-	h.Mu.RLock()
-	s, ok := h.Sessions[sessionID]
-	h.Mu.RUnlock()
-	if !ok {
-		return
+	stream := make(chan []byte, terminalStreamBuffer)
+	session.Mu.Lock()
+	session.Streams[stream] = true
+	session.Mu.Unlock()
+	return stream, func() {
+		session.Mu.Lock()
+		if session.Streams[stream] {
+			delete(session.Streams, stream)
+			close(stream)
+		}
+		session.Mu.Unlock()
 	}
-	s.Mu.Lock()
-	delete(s.Conns, conn)
-	s.Mu.Unlock()
 }
 
-// Broadcast sends data to all browser connections in a terminal session.
+// Broadcast sends data to all subscribers of a terminal session.
 func (h *TerminalHubManager) Broadcast(sessionID string, data interface{}) {
 	h.Mu.RLock()
 	s, ok := h.Sessions[sessionID]
@@ -108,16 +80,9 @@ func (h *TerminalHubManager) Broadcast(sessionID string, data interface{}) {
 			close(stream)
 		}
 	}
-	for conn := range s.Conns {
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
-			log.Printf("[terminal] %s: write error: %v", sessionID, err)
-			delete(s.Conns, conn)
-		}
-	}
 }
 
-// Close removes a terminal session and closes all browser connections.
+// Close removes a terminal session and closes all subscriber channels.
 func (h *TerminalHubManager) Close(sessionID string) {
 	h.Mu.Lock()
 	s, ok := h.Sessions[sessionID]
@@ -131,9 +96,6 @@ func (h *TerminalHubManager) Close(sessionID string) {
 		for stream := range s.Streams {
 			delete(s.Streams, stream)
 			close(stream)
-		}
-		for conn := range s.Conns {
-			conn.Close()
 		}
 		s.Mu.Unlock()
 	}

@@ -1,9 +1,4 @@
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import type { Device } from "./types";
 
 export function formatBytes(bytes?: number) {
   if (bytes == null || bytes < 0) return "—";
@@ -171,58 +166,92 @@ export function checkinLabel(status: number) {
 
 export function parseIP(raw?: string) {
   if (!raw) return "";
+  const clean = (value: string) => value.split("/")[0];
   try {
     const data = JSON.parse(raw);
     if (Array.isArray(data)) {
-      const hit = data.find((item) => item && (item.addr || item.ip || item.ipv4));
-      return hit?.addr || hit?.ip || hit?.ipv4 || "";
+      const hit = data.find((item) => item && (item.ipv4 || item.ip || item.addr || item.address));
+      return hit ? clean(String(hit.ipv4 || hit.ip || hit.addr || hit.address)) : "";
     }
+    return typeof data === "string" ? clean(data) : "";
   } catch {
-    return raw;
+    return clean(raw);
   }
-  return raw;
 }
 
 export function deviceKey(room: string, id: number) {
   return room + ":" + id;
 }
 
-export const PAGES = [
-  "rooms",
-  "dashboard",
-  "devices",
-  "screen",
-  "commands",
-  "network",
-  "distribute",
-  "power",
-  "checkin",
-  "broadcast",
-  "settings",
-] as const;
+export type TagType = "success" | "warning" | "danger" | "info" | "primary";
 
-export type PageId = (typeof PAGES)[number];
-
-export const PAGE_TITLE: Record<PageId, string> = {
-  rooms: "机房",
-  dashboard: "总览",
-  devices: "设备",
-  screen: "屏幕",
-  commands: "命令",
-  network: "网络",
-  distribute: "分发",
-  power: "电源",
-  checkin: "签到",
-  broadcast: "广播",
-  settings: "设置",
-};
-
-export function parsePage(hash: string): PageId {
-  const page = hash.replace(/^#/, "") as PageId;
-  return PAGES.includes(page) ? page : "dashboard";
+export function statusType(status?: string): TagType {
+  switch (status) {
+    case "completed": case "fired": case "sent": return "success";
+    case "failed": case "timeout": case "stalled": return "danger";
+    case "cancelled": case "stopped": case "unknown": return "warning";
+    case "running": case "downloading": case "verifying": case "executing": case "dispatched": return "primary";
+    default: return "info";
+  }
 }
 
-export function roomFromPath(pathname = location.pathname) {
-  const match = pathname.match(/^\/room\/([^/]+)\/?$/);
-  return match ? decodeURIComponent(match[1]) : "";
+export function checkinType(status: number): TagType {
+  return status === 1 ? "success" : status === 2 ? "warning" : "info";
+}
+
+export function pct(value?: number) {
+  return value == null || value < 0 ? "—" : value.toFixed(0) + "%";
+}
+
+export function targetLabel(command: { target_type: string; target_id?: number }) {
+  if (command.target_type === "broadcast") return "全部在线";
+  if (command.target_type === "list") return "指定设备";
+  return "#" + (command.target_id ?? "");
+}
+
+/**
+ * matchDevice is the shared search used by every list: number (with or
+ * without "#"), student name, student number, hostname, IP and MAC.
+ * Space-separated terms must all match.
+ */
+export function matchDevice(device: Device, query: string) {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = [
+    "#" + device.assigned_id,
+    device.hostname,
+    device.student_name,
+    device.student_num,
+    parseIP(device.local_ip),
+    device.mac_address,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return terms.every((term) => {
+    if (/^#?\d+$/.test(term)) {
+      const n = Number(term.replace("#", ""));
+      if (device.assigned_id === n) return true;
+      if (term.startsWith("#")) return false;
+    }
+    return hay.includes(term);
+  });
+}
+
+export function downloadCSV(name: string, rows: (string | number)[][]) {
+  const csv = "﻿" + rows.map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+export function toLocalInput(iso?: string) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }

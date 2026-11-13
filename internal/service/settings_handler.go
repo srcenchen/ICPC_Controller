@@ -161,3 +161,30 @@ func (h *SettingsHandler) UpdatePresets(w http.ResponseWriter, r *http.Request) 
 	h.settings.SetPresets(presets)
 	writeJSON(w, http.StatusOK, h.settings.GetPresets())
 }
+
+// GetScreenMonitor returns whether contestant screen capture is enabled (GET /api/settings/screen).
+func (h *SettingsHandler) GetScreenMonitor(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": h.settings.GetScreenMonitorEnabled()})
+}
+
+// UpdateScreenMonitor toggles contestant screen capture and notifies clients (PUT /api/settings/screen).
+func (h *SettingsHandler) UpdateScreenMonitor(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	h.settings.SetScreenMonitorEnabled(req.Enabled)
+	cfgData, _ := json.Marshal(struct {
+		Type    string `json:"type"`
+		Enabled bool   `json:"enabled"`
+	}{
+		Type:    "screen_monitor_config",
+		Enabled: req.Enabled,
+	})
+	cfgData = append(cfgData, '\n')
+	h.hub.BroadcastToClients(cfgData)
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+}

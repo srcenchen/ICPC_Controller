@@ -104,7 +104,7 @@ func discoverXAuthority() string {
 	}
 
 	// 4. Last resort: scan process environments.
-	if path := stealXAuthorityFromProc(); path != "" {
+	if path := discoverXAuthorityFromProc(); path != "" {
 		log.Printf("[x11] resolved Xauthority via /proc scan: %s", path)
 		return path
 	}

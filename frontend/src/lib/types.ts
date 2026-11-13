@@ -154,3 +154,11 @@ export type BroadcastConfig = {
 };
 
 export type AdminEvent = { event: string; data?: Record<string, unknown> };
+
+export type DeviceEvent = { id: number; event: string; detail: string; at: string };
+export type Schedule = { id: number; action: string; run_at: string; target_type: string; target_ids?: number[]; note: string; status: string };
+export type Job = { id: string; room_id: string; status: string; response: string; created_at: string };
+export type Snapshot = { id: number; name: string; created_at: string; op_count: number };
+export type SnapshotOp = { id: number; kind: string; summary: string; created_at: string; delivered: number };
+export type Stats = { total_devices: number; online_devices: number; offline_devices: number; checked_in: number; total_commands: number; recent_commands: CommandLog[] };
+export type CheckinStats = { total: number; checked_in: number; checked_out: number; not_checked: number };

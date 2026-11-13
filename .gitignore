@@ -2,6 +2,7 @@
 /client
 /server
 /icpc-server
+/server-linux.gz
 *.exe
 *.test
 *.out

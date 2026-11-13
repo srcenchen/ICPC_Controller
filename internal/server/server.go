@@ -102,6 +102,8 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("PUT /api/settings/presets", cfg.SettingsH.UpdatePresets)
 	mux.HandleFunc("GET /api/settings/checkin", cfg.SettingsH.GetCheckinConfig)
 	mux.HandleFunc("PUT /api/settings/checkin", cfg.SettingsH.UpdateCheckinConfig)
+	mux.HandleFunc("GET /api/settings/screen", cfg.SettingsH.GetScreenMonitor)
+	mux.HandleFunc("PUT /api/settings/screen", cfg.SettingsH.UpdateScreenMonitor)
 
 	mux.HandleFunc("GET /api/network/rules", cfg.NetworkH.GetRules)
 	mux.HandleFunc("PUT /api/network/rules", cfg.NetworkH.UpdateRules)
@@ -251,11 +253,11 @@ func New(cfg Config) *Server {
 	return &Server{
 		stopBackground: stopBackground,
 		httpServer: &http.Server{
-			Addr:         ":" + cfg.Port,
-			Handler:      handler,
-			ReadTimeout:  15 * time.Second,
-			WriteTimeout: 0, // allow long-lived WS / screen proxy streams
-			IdleTimeout:  120 * time.Second,
+			Addr:              ":" + cfg.Port,
+			Handler:           handler,
+			ReadHeaderTimeout: 15 * time.Second,
+			WriteTimeout:      0, // allow long-lived WS / screen proxy streams
+			IdleTimeout:       120 * time.Second,
 		},
 		bindIP:      cfg.BindIP,
 		enableAvahi: cfg.Avahi,

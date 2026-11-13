@@ -1337,7 +1337,13 @@ func runCommandStreaming(sender *safeSender, msg *model.ExecuteMessage, mu *sync
 
 func startTerminal(sender *safeSender, msg *model.TerminalOpenMessage, mu *sync.Mutex, sessions map[string]*os.File) {
 	log.Printf("[client] terminal %s: cols=%d rows=%d", msg.SessionID, msg.Cols, msg.Rows)
-	cmd := exec.Command("bash")
+	cmd := exec.Command("bash", "-l")
+	// The client usually runs under systemd with an almost empty environment;
+	// without TERM/HOME the shell behaves badly (no colors, broken clear/vim).
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "HOME=/root", "LANG=C.UTF-8", "LC_ALL=C.UTF-8")
+	if st, err := os.Stat("/root"); err == nil && st.IsDir() {
+		cmd.Dir = "/root"
+	}
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(msg.Rows), Cols: uint16(msg.Cols)})
 	if err != nil {
 		sendJSON(sender, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
@@ -1347,27 +1353,70 @@ func startTerminal(sender *safeSender, msg *model.TerminalOpenMessage, mu *sync.
 	sessions[msg.SessionID] = f
 	mu.Unlock()
 
-	defer func() {
-		f.Close()
-		_ = cmd.Wait()
-		mu.Lock()
-		delete(sessions, msg.SessionID)
-		mu.Unlock()
-		sendJSON(sender, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
-	}()
-
+	readDone := make(chan struct{})
 	go func() {
-		buf := make([]byte, 4096)
+		defer close(readDone)
+		buf := make([]byte, 8192)
+		carry := 0 // bytes of an incomplete UTF-8 sequence kept from the last read
 		for {
-			n, err := f.Read(buf)
+			n, err := f.Read(buf[carry:])
+			if n > 0 {
+				end := utf8CompleteLen(buf[:carry+n])
+				if end > 0 {
+					sendJSON(sender, model.TerminalOutputMessage{Type: "terminal_output", SessionID: msg.SessionID, Data: string(buf[:end])})
+				}
+				carry = copy(buf, buf[end:carry+n])
+			}
 			if err != nil {
+				if carry > 0 {
+					sendJSON(sender, model.TerminalOutputMessage{Type: "terminal_output", SessionID: msg.SessionID, Data: string(buf[:carry])})
+				}
 				return
 			}
-			sendJSON(sender, model.TerminalOutputMessage{Type: "terminal_output", SessionID: msg.SessionID, Data: string(buf[:n])})
 		}
 	}()
 
 	_ = cmd.Wait()
+	// Let the reader drain whatever the shell printed last, but never hang on
+	// a pty kept open by a background child.
+	select {
+	case <-readDone:
+	case <-time.After(500 * time.Millisecond):
+	}
+	f.Close()
+	mu.Lock()
+	// A newer session may reuse the ID on old servers; only remove our own pty.
+	if sessions[msg.SessionID] == f {
+		delete(sessions, msg.SessionID)
+	}
+	mu.Unlock()
+	sendJSON(sender, model.TerminalClosedMessage{Type: "terminal_closed", SessionID: msg.SessionID})
+}
+
+// utf8CompleteLen returns the length of the longest prefix of b that does not
+// end inside a multi-byte UTF-8 sequence, so a character is never split
+// across two output messages (JSON encoding would turn halves into U+FFFD).
+func utf8CompleteLen(b []byte) int {
+	n := len(b)
+	for i := 1; i <= 3 && i <= n; i++ {
+		c := b[n-i]
+		if c < 0x80 { // ASCII: everything before is complete
+			return n
+		}
+		if c >= 0xC0 { // lead byte: complete only if all continuation bytes are present
+			need := 2
+			if c >= 0xF0 {
+				need = 4
+			} else if c >= 0xE0 {
+				need = 3
+			}
+			if i >= need {
+				return n
+			}
+			return n - i
+		}
+	}
+	return n
 }
 
 var (

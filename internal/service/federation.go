@@ -342,6 +342,9 @@ func allowedRelayRequest(method, path string) bool {
 	if method != "GET" && method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
 		return false
 	}
+	if path == "/api/settings/screen" {
+		return method == "GET" || method == "PUT"
+	}
 	// Screen frames may be relayed as single JPEG snapshots (the cloud UI polls
 	// them); continuous MJPEG streams are never relayed.
 	if strings.HasSuffix(path, "/screen") {
@@ -364,7 +367,7 @@ func allowedRelayRequest(method, path string) bool {
 			return true
 		}
 	}
-	return path == "/api/stats" || path == "/api/presets" || path == "/api/settings/presets" || path == "/api/settings/checkin"
+	return path == "/api/stats" || path == "/api/presets" || path == "/api/settings/presets" || path == "/api/settings/checkin" || path == "/api/settings/screen"
 }
 
 func (federation *Federation) Proxy(writer http.ResponseWriter, httpRequest *http.Request) {

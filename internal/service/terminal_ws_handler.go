@@ -10,6 +10,7 @@ import (
 	"ICPCRemoteControl/internal/biz"
 	"ICPCRemoteControl/internal/model"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,18 +23,20 @@ func NewTerminalWSHandler(hub *biz.Hub) *TerminalWSHandler {
 	return &TerminalWSHandler{hub: hub}
 }
 
+const maxTermCols, maxTermRows = 500, 200
+
 // Serve handles browser terminal WebSocket (GET /ws/terminal/{device_id}).
+//
+// Every browser connection gets its own session ID. A shared per-device ID let
+// a late "terminal_closed" from a previous session tear down the next one,
+// which made reconnecting fail. This goroutine is also the only writer on the
+// WebSocket (gorilla forbids concurrent writers); output arrives through a
+// channel from TerminalHub.
 func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	deviceID, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "invalid device id", http.StatusBadRequest)
-		return
-	}
-
-	client := h.hub.GetClient(deviceID)
-	if client == nil {
-		http.Error(w, "device not connected", http.StatusNotFound)
 		return
 	}
 
@@ -43,126 +46,111 @@ func (h *TerminalWSHandler) Serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(64 << 10)
 
-	sessionID := "term_" + idStr
+	client := h.hub.GetClient(deviceID)
+	if client == nil {
+		writeTermNotice(conn, "\x1b[31m设备 #"+idStr+" 不在线，无法打开终端\x1b[0m\r\n")
+		conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4404, "device offline"), time.Now().Add(time.Second))
+		return
+	}
 
-	// Subscribe to terminal output.
-	TerminalHub.Subscribe(sessionID, conn)
-	defer TerminalHub.Unsubscribe(sessionID, conn)
+	sessionID := "term_" + idStr + "_" + uuid.NewString()[:8]
+	stream, unsubscribe := TerminalHub.SubscribeStream(sessionID)
+	defer func() {
+		unsubscribe()
+		TerminalHub.Close(sessionID)
+	}()
 
-	// Ping/pong to keep connection alive through proxies.
+	send := func(v interface{}) bool {
+		data, _ := json.Marshal(v)
+		data = append(data, '\n')
+		select {
+		case client.Send <- data:
+			return true
+		case <-time.After(2 * time.Second):
+			return false
+		}
+	}
+
+	cols, rows := 80, 24
+	if v, err := strconv.Atoi(r.URL.Query().Get("cols")); err == nil && v > 0 && v <= maxTermCols {
+		cols = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("rows")); err == nil && v > 0 && v <= maxTermRows {
+		rows = v
+	}
+	if !send(model.TerminalOpenMessage{Type: "terminal_open", SessionID: sessionID, Cols: cols, Rows: rows}) {
+		writeTermNotice(conn, "\x1b[31m设备连接繁忙，请稍后重试\x1b[0m\r\n")
+		return
+	}
+	defer send(model.TerminalCloseMessage{Type: "terminal_close", SessionID: sessionID})
+
 	conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
 
-	// Open terminal on client.
-	const maxCols, maxRows = 500, 200
-	cols := 80
-	rows := 24
-	if c := r.URL.Query().Get("cols"); c != "" {
-		if v, err := strconv.Atoi(c); err == nil && v > 0 && v <= maxCols {
-			cols = v
-		}
-	}
-	if rs := r.URL.Query().Get("rows"); rs != "" {
-		if v, err := strconv.Atoi(rs); err == nil && v > 0 && v <= maxRows {
-			rows = v
-		}
-	}
-
-	openMsg := model.TerminalOpenMessage{
-		Type:      "terminal_open",
-		SessionID: sessionID,
-		Cols:      cols,
-		Rows:      rows,
-	}
-	data, _ := json.Marshal(openMsg)
-	data = append(data, '\n')
-	select {
-	case client.Send <- data:
-	default:
-	}
-
-	// Read from browser and forward to client as terminal_input / terminal_resize.
-	readErr := make(chan error, 1)
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
 		for {
-			_, msg, err := conn.ReadMessage()
+			kind, msg, err := conn.ReadMessage()
 			if err != nil {
-				readErr <- err
 				return
 			}
-
-			// Check if it's a resize control message (JSON) or raw terminal input.
-			if len(msg) > 0 && msg[0] == '{' {
+			conn.SetReadDeadline(time.Now().Add(wsPongWait))
+			// Keystrokes arrive as binary frames; text frames that parse as
+			// {"type":"resize"} are control messages. Anything else is input,
+			// so pasting JSON into the shell still works.
+			if kind == websocket.TextMessage && len(msg) > 0 && msg[0] == '{' {
 				var ctrl struct {
 					Type string `json:"type"`
 					Cols int    `json:"cols"`
 					Rows int    `json:"rows"`
 				}
 				if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" {
-					if ctrl.Cols > maxCols {
-						ctrl.Cols = maxCols
-					}
-					if ctrl.Rows > maxRows {
-						ctrl.Rows = maxRows
-					}
-					resizeMsg := model.TerminalResizeMessage{
-						Type:      "terminal_resize",
-						SessionID: sessionID,
-						Cols:      ctrl.Cols,
-						Rows:      ctrl.Rows,
-					}
-					data, _ := json.Marshal(resizeMsg)
-					data = append(data, '\n')
-					select {
-					case client.Send <- data:
-					default:
+					if ctrl.Cols > 0 && ctrl.Rows > 0 {
+						send(model.TerminalResizeMessage{
+							Type:      "terminal_resize",
+							SessionID: sessionID,
+							Cols:      min(ctrl.Cols, maxTermCols),
+							Rows:      min(ctrl.Rows, maxTermRows),
+						})
 					}
 					continue
 				}
 			}
-
-			// Raw terminal input.
-			inputMsg := model.TerminalInputMessage{
-				Type:      "terminal_input",
-				SessionID: sessionID,
-				Data:      string(msg),
-			}
-			data, _ := json.Marshal(inputMsg)
-			data = append(data, '\n')
-			select {
-			case client.Send <- data:
-			default:
+			if !send(model.TerminalInputMessage{Type: "terminal_input", SessionID: sessionID, Data: string(msg)}) {
+				return
 			}
 		}
 	}()
 
-	pingTicker := time.NewTicker(wsPingPeriod)
-	defer pingTicker.Stop()
+	ping := time.NewTicker(wsPingPeriod)
+	defer ping.Stop()
 	for {
 		select {
-		case <-readErr:
-			goto cleanup
-		case <-pingTicker.C:
+		case <-readDone:
+			return
+		case data, ok := <-stream:
+			if !ok {
+				return
+			}
 			conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				goto cleanup
+			if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+				return
+			}
+		case <-ping.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				return
 			}
 		}
 	}
-cleanup:
-	// Close terminal on client.
-	closeMsg := model.TerminalCloseMessage{
-		Type:      "terminal_close",
-		SessionID: sessionID,
-	}
-	data, _ = json.Marshal(closeMsg)
-	data = append(data, '\n')
-	select {
-	case client.Send <- data:
-	default:
-	}
+}
+
+func writeTermNotice(conn *websocket.Conn, text string) {
+	conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	_ = conn.WriteMessage(websocket.BinaryMessage, []byte(text))
 }

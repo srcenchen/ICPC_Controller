@@ -18,7 +18,7 @@ func (federation *Federation) Terminal(writer http.ResponseWriter, httpRequest *
 	federation.mu.Lock()
 	connection := federation.connections[room]
 	federation.mu.Unlock()
-	if err != nil || deviceID < 1 || connection == nil || federation.settings.GetDeployment().Mode != "cloud" {
+	if err != nil || deviceID < 1 || federation.settings.GetDeployment().Mode != "cloud" {
 		http.Error(writer, "room or device unavailable", 404)
 		return
 	}
@@ -27,9 +27,14 @@ func (federation *Federation) Terminal(writer http.ResponseWriter, httpRequest *
 		return
 	}
 	defer conn.Close()
+	if connection == nil {
+		writeTermNotice(conn, "\x1b[31m该机房中转当前离线，无法打开终端\x1b[0m\r\n")
+		conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4404, "room offline"), time.Now().Add(time.Second))
+		return
+	}
 	conn.SetReadLimit(64 << 10)
 	sessionID := uuid.NewString()
-	stream := make(chan FederationMessage, 128)
+	stream := make(chan FederationMessage, 512)
 	federation.mu.Lock()
 	federation.terminals[room+":"+sessionID] = stream
 	federation.mu.Unlock()
@@ -48,7 +53,7 @@ func (federation *Federation) Terminal(writer http.ResponseWriter, httpRequest *
 	go func() {
 		defer close(readDone)
 		for {
-			_, body, err := conn.ReadMessage()
+			kind, body, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
@@ -58,7 +63,8 @@ func (federation *Federation) Terminal(writer http.ResponseWriter, httpRequest *
 				Cols int    `json:"cols"`
 				Rows int    `json:"rows"`
 			}
-			if json.Unmarshal(body, &control) == nil && control.Type == "resize" {
+			// Same framing as the local terminal: binary = keystrokes, text = control.
+			if kind == websocket.TextMessage && json.Unmarshal(body, &control) == nil && control.Type == "resize" {
 				message.Type = "terminal_resize"
 				message.Cols = control.Cols
 				message.Rows = control.Rows

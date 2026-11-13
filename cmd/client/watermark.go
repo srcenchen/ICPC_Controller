@@ -34,7 +34,10 @@ func findDisplay() string { return resolveDisplay() }
 
 func findXAuthority() string { return resolveXAuthority() }
 
-func stealXAuthorityFromProc() string {
+// discoverXAuthorityFromProc scans process environments for the logged-in
+// desktop user's XAUTHORITY so the root client can draw the watermark and
+// capture the screen on that user's X display.
+func discoverXAuthorityFromProc() string {
 	files, err := os.ReadDir("/proc")
 	if err != nil {
 		return ""
@@ -86,7 +89,7 @@ func stealXAuthorityFromProc() string {
 		if hasDisplay0 && xauthVal != "" {
 			if _, err := os.Stat(xauthVal); err == nil {
 				if isTargetUserProcess {
-					log.Printf("[watermark] stole target user XAUTHORITY from PID %s: %s", name, xauthVal)
+					log.Printf("[watermark] found logged-in user XAUTHORITY via PID %s: %s", name, xauthVal)
 					return xauthVal
 				}
 				backupXauth = xauthVal
@@ -95,7 +98,7 @@ func stealXAuthorityFromProc() string {
 	}
 
 	if backupXauth != "" {
-		log.Printf("[watermark] stole backup XAUTHORITY: %s", backupXauth)
+		log.Printf("[watermark] using fallback XAUTHORITY: %s", backupXauth)
 		return backupXauth
 	}
 
