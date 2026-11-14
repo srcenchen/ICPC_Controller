@@ -148,9 +148,12 @@ export async function run<T>(fn: () => Promise<T>, success?: string): Promise<T 
 export async function loadStatus() {
   try {
     const result = await api<{ deployment: Deployment; connection: string }>("/api/cluster/status");
-    store.deployment = result.deployment || { ...emptyDeploy };
+    const deployment = result.deployment || { ...emptyDeploy };
+    if (deployment.mode === "cloud") {
+      store.rooms = (await api<Room[]>("/api/cluster/rooms").catch(() => [])) || [];
+    }
+    store.deployment = deployment;
     store.connection = result.connection || "";
-    if (store.deployment.mode === "cloud") await refreshRooms();
   } catch {
     /* auth redirect handled in api() */
   }

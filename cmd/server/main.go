@@ -150,6 +150,7 @@ func main() {
 	snapshotMgr := service.NewSnapshotManager(snapshotRepo, settings, deviceRepo, hub, dispatcher)
 	snapshotMgr.SetDistribution(service.DistributionMgr)
 	snapshotMgr.SetPower(powerHandler)
+	snapshotMgr.SetBroadcastRepo(broadcastRepo)
 	commandHandler.SetSnapshotManager(snapshotMgr)
 	networkHandler.SetSnapshotManager(snapshotMgr)
 	powerHandler.SetSnapshotManager(snapshotMgr)

@@ -76,25 +76,52 @@ func (federation *Federation) PublishBroadcast(writer http.ResponseWriter, reque
 		writeJSON(writer, 400, map[string]string{"error": "广播内容过大（元数据上限 2 MiB，不含素材）"})
 		return
 	}
-	transaction, err := federation.db.BeginTx(request.Context(), nil)
-	if err != nil {
-		writeJSON(writer, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	defer transaction.Rollback()
-	jobs := make([]string, 0)
-	seen := make(map[string]bool)
+	uniqueRooms := make([]string, 0, len(input.RoomIDs))
+	seen := make(map[string]bool, len(input.RoomIDs))
 	for _, room := range input.RoomIDs {
 		if seen[room] {
 			continue
 		}
 		seen[room] = true
 		var exists int
+		if federation.db.QueryRow(`SELECT COUNT(*) FROM cluster_rooms WHERE id=?`, room).Scan(&exists) != nil || exists != 1 {
+			writeJSON(writer, 400, map[string]string{"error": "未知机房"})
+			return
+		}
+		uniqueRooms = append(uniqueRooms, room)
+	}
+	var snapID, snapOpID int64
+	var snapName string
+	if federation.snapshots != nil && (input.Action == "start" || input.Action == "stop") && federation.broadcastTargetsWholeFleet(uniqueRooms) {
+		snapID, snapName, snapOpID = federation.snapshots.RecordCloud(
+			"broadcast",
+			"广播 "+input.Action+" · "+input.Mode,
+			SnapshotPayload{Rooms: uniqueRooms, Action: input.Action, BroadcastJSON: body, BroadcastMode: input.Mode},
+		)
+	}
+	transaction, err := federation.db.BeginTx(request.Context(), nil)
+	if err != nil {
+		writeJSON(writer, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	defer transaction.Rollback()
+	jobs := make([]string, 0, len(uniqueRooms))
+	for _, room := range uniqueRooms {
+		var exists int
 		if transaction.QueryRow(`SELECT COUNT(*) FROM cluster_rooms WHERE id=?`, room).Scan(&exists) != nil || exists != 1 {
 			writeJSON(writer, 400, map[string]string{"error": "未知机房"})
 			return
 		}
-		message := FederationMessage{Type: "request", ID: uuid.NewString(), Method: "POST", Path: "/api/broadcast/sync", Body: body}
+		message := FederationMessage{
+			Type:         "request",
+			ID:           uuid.NewString(),
+			Method:       "POST",
+			Path:         "/api/broadcast/sync",
+			Body:         body,
+			SnapshotID:   snapID,
+			SnapshotName: snapName,
+			SnapshotOpID: snapOpID,
+		}
 		raw, _ := json.Marshal(message)
 		if _, err := transaction.Exec(`INSERT INTO cluster_jobs(id,room_id,request,created_at) VALUES(?,?,?,?)`, message.ID, room, string(raw), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			writeJSON(writer, 500, map[string]string{"error": err.Error()})
@@ -106,9 +133,10 @@ func (federation *Federation) PublishBroadcast(writer http.ResponseWriter, reque
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if federation.snapshots != nil && (input.Action == "start" || input.Action == "stop") && federation.broadcastTargetsWholeFleet(input.RoomIDs) {
-		federation.snapshots.RecordCloud("broadcast", "广播 "+input.Action+" · "+input.Mode, SnapshotPayload{Rooms: input.RoomIDs, BroadcastJSON: body, BroadcastMode: input.Mode})
+	if snapOpID > 0 {
+		federation.snapshots.PushCloudSync()
 	}
+	federation.nudgeJobs()
 	writeJSON(writer, 202, map[string]any{"job_ids": jobs, "revision": snapshot.Revision})
 }
 
@@ -338,18 +366,56 @@ func (federation *Federation) applyBroadcast(ctx context.Context, config Deploym
 		if publication.Action == "start" || publication.Action == "reset" {
 			federation.broadcast.pushSyncReset(publication.Mode)
 		}
-		command := ""
-		if publication.Action == "start" {
-			address := strings.TrimRight(baseURL, "/") + "/broadcast/" + publication.Mode
-			command = "full-firefox kill; full-firefox '" + strings.ReplaceAll(address, "'", "'\"'\"'") + "'"
-		} else if publication.Action == "stop" {
-			command = "full-firefox kill"
-		}
-		if command != "" {
-			body, _ := json.Marshal(ExecuteRequest{TargetType: "broadcast", Command: command})
-			result := federation.localRequest(ctx, FederationMessage{ID: request.ID, Method: "POST", Path: "/api/commands", Body: body})
-			if result.Status >= 400 {
-				return fail(409, fmt.Errorf("广播已同步，但设备指令失败：%s；请在机房核实", result.Body))
+		if request.SkipOnline && request.SnapshotOpID > 0 && federation.snapshots != nil {
+			federation.snapshots.MarkRemoteOpSkipOnline(
+				request.SnapshotID,
+				request.SnapshotName,
+				request.SnapshotOpID,
+				"broadcast",
+				"广播 "+publication.Action+" · "+publication.Mode,
+				SnapshotPayload{Kind: "broadcast", Action: publication.Action, BroadcastMode: publication.Mode},
+			)
+		} else {
+			command := ""
+			if publication.Action == "start" {
+				address := strings.TrimRight(baseURL, "/") + "/broadcast/" + publication.Mode
+				command = "full-firefox kill; full-firefox '" + strings.ReplaceAll(address, "'", "'\"'\"'") + "'"
+			} else if publication.Action == "stop" {
+				command = "full-firefox kill"
+			}
+			if command != "" {
+				body, _ := json.Marshal(ExecuteRequest{TargetType: "broadcast", Command: command})
+				subCtx := ctx
+				if request.SnapshotOpID > 0 {
+					subCtx = withSuppressSnapshot(ctx)
+				}
+				result := federation.localRequest(subCtx, FederationMessage{ID: request.ID, Method: "POST", Path: "/api/commands", Body: body})
+				if result.Status >= 400 {
+					return fail(409, fmt.Errorf("广播已同步，但设备指令失败：%s；请在机房核实", result.Body))
+				}
+				if request.SnapshotOpID > 0 && federation.snapshots != nil {
+					var cmdRes struct {
+						Children []struct {
+							TargetID *int   `json:"target_id"`
+							Status   string `json:"status"`
+						} `json:"children"`
+					}
+					var delivered []int
+					if json.Unmarshal(result.Body, &cmdRes) == nil {
+						for _, child := range cmdRes.Children {
+							if child.Status == "dispatched" && child.TargetID != nil {
+								delivered = append(delivered, *child.TargetID)
+							}
+						}
+					}
+					federation.snapshots.RecordLocalContext(
+						ctx,
+						"broadcast",
+						"广播 "+publication.Action+" · "+publication.Mode,
+						SnapshotPayload{Action: publication.Action, BroadcastMode: publication.Mode},
+						delivered,
+					)
+				}
 			}
 		}
 	}

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import {
-  Plus, Delete, CopyDocument, ArrowUp, ArrowDown, View, VideoPlay, VideoPause, RefreshRight, Upload,
+  Plus, Delete, CopyDocument, ArrowUp, ArrowDown, View, VideoPlay, VideoPause, RefreshRight, Upload, Check,
 } from "@element-plus/icons-vue";
 import { api } from "@/lib/api";
-import { store, isCloud, run, toast, confirmAction } from "@/lib/store";
-import type { BroadcastConfig, BroadcastFont, BroadcastItem, BroadcastPage } from "@/lib/types";
+import { store, isCloud, go, run, toast, confirmAction } from "@/lib/store";
+import type { BroadcastConfig, BroadcastFont, BroadcastItem, BroadcastPage, Room } from "@/lib/types";
 
 type ModeId = "before" | "contesting" | "after";
 const MODES: { label: string; value: ModeId }[] = [
@@ -34,8 +34,50 @@ const pageID = ref<number | null>(null);
 const itemID = ref<number | null>(null);
 const fonts = ref<BroadcastFont[]>([]);
 const config = ref<BroadcastConfig | null>(null);
-const targets = ref<string[]>(store.roomID ? [store.roomID] : []);
+const targetScope = ref<"all" | "custom">(store.roomID ? "custom" : "all");
+const pickedRooms = ref<string[]>(store.roomID ? [store.roomID] : []);
 const dirty = ref(false);
+
+const pickedSet = computed(() => new Set(pickedRooms.value));
+const validPickedRooms = computed(() => {
+  const valid = new Set(store.rooms.map((r) => r.id));
+  return pickedRooms.value.filter((id) => valid.has(id));
+});
+const effectiveTargets = computed(() => {
+  if (!store.rooms.length) return [];
+  if (store.rooms.length === 1 || targetScope.value === "all") {
+    return store.rooms.map((r) => r.id);
+  }
+  return validPickedRooms.value;
+});
+const offlineRooms = computed(() => store.rooms.filter((r) => !r.online));
+const onlineRoomCount = computed(() => store.rooms.length - offlineRooms.value.length);
+const offlineSummary = computed(() => {
+  const names = offlineRooms.value.map((r) => r.name);
+  if (!names.length) return "";
+  return names.length <= 2 ? `${names.join("、")} 离线` : `${names.slice(0, 2).join("、")} 等 ${names.length} 个离线`;
+});
+const scopeOptions = computed(() => [
+  { label: `全部机房 · ${store.rooms.length}`, value: "all" },
+  { label: validPickedRooms.value.length ? `指定机房 · ${validPickedRooms.value.length}` : "指定机房", value: "custom" },
+]);
+
+function roomOnlineDevices(r: Room) {
+  return (r.devices || []).filter((d) => d.connected).length;
+}
+function toggleRoom(id: string) {
+  targetScope.value = "custom";
+  pickedRooms.value = pickedSet.value.has(id) ? pickedRooms.value.filter((x) => x !== id) : [...pickedRooms.value, id];
+}
+function selectOnlineRooms() {
+  targetScope.value = "custom";
+  pickedRooms.value = store.rooms.filter((r) => r.online).map((r) => r.id);
+}
+function invertRooms() {
+  targetScope.value = "custom";
+  const cur = new Set(validPickedRooms.value);
+  pickedRooms.value = store.rooms.map((r) => r.id).filter((id) => !cur.has(id));
+}
 const stageRef = ref<HTMLElement | null>(null);
 const boxes = ref<Record<number, { pos_x: number; pos_y: number; width: number; height: number }>>({});
 
@@ -93,9 +135,6 @@ async function load(keepPage = pageID.value, keepItem = itemID.value) {
 
 onMounted(() => {
   load(null, null).catch((e) => toast(e.message, "error"));
-  if (isCloud.value && !targets.value.length && store.rooms.length) {
-    targets.value = store.rooms.map((r) => r.id);
-  }
 });
 
 async function switchMode(next: ModeId) {
@@ -302,10 +341,25 @@ async function localPush(start: boolean) {
 
 async function cloudPublish(action: "sync" | "start" | "stop" | "reset") {
   if (dirty.value) return toast("请先保存右侧元素的修改", "warning");
-  if (!targets.value.length) return toast("请至少勾选一个目标机房", "warning");
-  const labels = { sync: "仅同步内容与素材", start: "同步素材并启动广播", stop: "关闭选手机广播", reset: "复位轮播顺序" };
-  if (!(await confirmAction(`对 ${targets.value.length} 个机房执行「${labels[action]}」？未变化的素材会自动跳过重复下载。`))) return;
-  const res = await run(() => api<{ revision: number }>("/api/cluster/broadcast", { json: { room_ids: targets.value, action, mode: mode.value } }));
+  if (!store.rooms.length) return toast("当前暂无已接入机房", "warning");
+  const ids = effectiveTargets.value;
+  if (!ids.length) return toast("请先选择目标机房，或切换为「全部机房」", "warning");
+  const labels = {
+    sync: `同步「${modeName(mode.value)}」内容与素材`,
+    start: `同步素材并推送「${modeName(mode.value)}」广播`,
+    stop: "关闭选手机广播",
+    reset: `复位「${modeName(mode.value)}」轮播顺序`,
+  };
+  const names = ids.map((id) => store.rooms.find((r) => r.id === id)?.name || id);
+  const scopeText =
+    store.rooms.length > 1 && targetScope.value === "all"
+      ? `全部 ${ids.length} 个机房`
+      : ids.length === 1
+        ? `机房「${names[0]}」`
+        : `已选 ${ids.length} 个机房（${names.length <= 3 ? names.join("、") : names.slice(0, 3).join("、") + " 等"}）`;
+  const extra = action === "sync" || action === "start" ? "未变化的素材会自动跳过重复下载。" : "";
+  if (!(await confirmAction(`对${scopeText}执行「${labels[action]}」？${extra}`, { danger: action === "stop", confirmText: action === "stop" ? "关闭广播" : "确定" }))) return;
+  const res = await run(() => api<{ revision: number }>("/api/cluster/broadcast", { json: { room_ids: ids, action, mode: mode.value } }));
   if (res) toast(`广播版本 #${res.revision} 已加入投递队列`, "success");
 }
 
@@ -328,10 +382,10 @@ function modeName(m?: string) {
       <el-tag v-if="dirty" type="warning">元素有未保存修改</el-tag>
       <span class="spacer" />
       <template v-if="isCloud">
-        <el-button @click="cloudPublish('sync')">仅同步素材</el-button>
-        <el-button type="primary" :icon="VideoPlay" @click="cloudPublish('start')">同步并推送</el-button>
-        <el-button :icon="RefreshRight" @click="cloudPublish('reset')">复位轮播</el-button>
-        <el-button type="danger" plain :icon="VideoPause" @click="cloudPublish('stop')">关闭广播</el-button>
+        <el-button :disabled="!store.rooms.length" @click="cloudPublish('sync')">仅同步素材</el-button>
+        <el-button type="primary" :icon="VideoPlay" :disabled="!store.rooms.length" @click="cloudPublish('start')">同步并推送</el-button>
+        <el-button :icon="RefreshRight" :disabled="!store.rooms.length" @click="cloudPublish('reset')">复位轮播</el-button>
+        <el-button type="danger" plain :icon="VideoPause" :disabled="!store.rooms.length" @click="cloudPublish('stop')">关闭广播</el-button>
       </template>
       <template v-else>
         <el-button type="primary" :icon="VideoPlay" @click="localPush(true)">推送到选手机</el-button>
@@ -341,13 +395,56 @@ function modeName(m?: string) {
     </div>
 
     <el-card v-if="isCloud" shadow="never" body-style="padding: 10px 14px">
-      <div class="row">
+      <div v-if="!store.rooms.length" class="row">
+        <span class="dot" />
+        <span class="muted small">暂无已接入机房 — 可先在云端编排广播内容，待机房中转连接后再同步推送</span>
+        <span class="spacer" />
+        <el-button size="small" link type="primary" @click="go('rooms')">前往机房总览</el-button>
+      </div>
+
+      <div v-else-if="store.rooms.length === 1" class="row">
         <span class="muted small">发布目标机房：</span>
-        <el-checkbox-group v-model="targets" class="row">
-          <el-checkbox v-for="r in store.rooms" :key="r.id" :value="r.id">{{ r.name }}</el-checkbox>
-        </el-checkbox-group>
-        <el-button size="small" link type="primary" @click="targets = store.rooms.map((r) => r.id)">全选</el-button>
-        <el-button size="small" link @click="targets = []">清空</el-button>
+        <span class="room-pill static">
+          <span class="dot" :class="{ on: store.rooms[0].online }" />
+          <span class="room-pill-name">{{ store.rooms[0].name }}</span>
+          <span class="room-pill-meta">
+            {{ store.rooms[0].online ? `${roomOnlineDevices(store.rooms[0])}/${store.rooms[0].devices.length} 台在线` : "中转离线（上线后自动投递）" }}
+          </span>
+        </span>
+        <span class="spacer" />
+        <span class="muted small">不会覆盖机房本地配置的局域网推送地址</span>
+      </div>
+
+      <div v-else class="row target-row">
+        <span class="muted small">发布范围：</span>
+        <el-segmented v-model="targetScope" size="small" :options="scopeOptions" />
+        <template v-if="targetScope === 'all'">
+          <span class="muted small status-summary">
+            <span class="dot" :class="offlineRooms.length ? 'warn' : 'on'" />
+            <template v-if="!offlineRooms.length">{{ store.rooms.length }} 个机房中转均在线</template>
+            <template v-else>{{ onlineRoomCount }}/{{ store.rooms.length }} 个中转在线（{{ offlineSummary }}，恢复后自动投递）</template>
+          </span>
+        </template>
+        <template v-else>
+          <div class="room-pills">
+            <button
+              v-for="r in store.rooms"
+              :key="r.id"
+              type="button"
+              class="room-pill"
+              :class="{ active: pickedSet.has(r.id) }"
+              @click="toggleRoom(r.id)"
+            >
+              <el-icon v-if="pickedSet.has(r.id)" class="pill-check"><Check /></el-icon>
+              <span class="dot" :class="{ on: r.online }" />
+              <span class="room-pill-name">{{ r.name }}</span>
+              <span class="room-pill-meta">{{ r.online ? `${roomOnlineDevices(r)}/${r.devices.length}` : "离线" }}</span>
+            </button>
+          </div>
+          <el-button v-if="onlineRoomCount > 0 && onlineRoomCount < store.rooms.length" size="small" link type="primary" @click="selectOnlineRooms">仅选在线</el-button>
+          <el-button v-if="store.rooms.length >= 3" size="small" link type="primary" @click="invertRooms">反选</el-button>
+          <el-button v-if="validPickedRooms.length" size="small" link @click="pickedRooms = []">清空</el-button>
+        </template>
         <span class="spacer" />
         <span class="muted small">不会覆盖各机房本地配置的局域网推送地址</span>
       </div>
@@ -557,6 +654,43 @@ function modeName(m?: string) {
 
 <style scoped>
 .topbar .el-button + .el-button { margin-left: 0; }
+.target-row .el-button + .el-button { margin-left: 0; }
+.status-summary { display: inline-flex; align-items: center; gap: 6px; }
+.room-pills { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.room-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--el-border-color);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color .15s, background-color .15s, color .15s;
+}
+.room-pill:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
+.room-pill.active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+.room-pill.static {
+  cursor: default;
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-text-color-primary);
+}
+.room-pill.static:hover { color: var(--el-text-color-primary); }
+.room-pill-name { font-weight: 500; }
+.room-pill.active .room-pill-name { font-weight: 600; }
+.room-pill-meta { color: var(--el-text-color-secondary); font-weight: normal; font-variant-numeric: tabular-nums; }
+.room-pill.active .room-pill-meta { color: var(--el-color-primary); opacity: 0.85; }
+.pill-check { font-size: 12px; }
 .studio { display: grid; grid-template-columns: 250px minmax(0, 1fr) 290px; gap: 14px; align-items: start; }
 @media (max-width: 1280px) { .studio { grid-template-columns: 1fr; } }
 .side { min-width: 0; }

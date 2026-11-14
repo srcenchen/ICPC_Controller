@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -68,7 +69,7 @@ func (h *NetworkHandler) Apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	command := buildApplyCommand(h.settings.GetNetworkRules())
-	cmd, status, errText := h.dispatch(req, command, "admin@"+getClientIP(r))
+	cmd, status, errText := h.dispatch(r.Context(), req, command, "admin@"+getClientIP(r))
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": errText})
 		return
@@ -84,7 +85,7 @@ func (h *NetworkHandler) Remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	command := buildRemoveCommand()
-	cmd, status, errText := h.dispatch(req, command, "admin@"+getClientIP(r))
+	cmd, status, errText := h.dispatch(r.Context(), req, command, "admin@"+getClientIP(r))
 	if status != 0 {
 		writeJSON(w, status, map[string]string{"error": errText})
 		return
@@ -92,7 +93,7 @@ func (h *NetworkHandler) Remove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
-func (h *NetworkHandler) dispatch(req ApplyRequest, command, executedBy string) (*model.CommandLog, int, string) {
+func (h *NetworkHandler) dispatch(ctx context.Context, req ApplyRequest, command, executedBy string) (*model.CommandLog, int, string) {
 	if req.TargetType != "single" && req.TargetType != "broadcast" && req.TargetType != "list" {
 		return nil, http.StatusBadRequest, "target_type must be 'single', 'list', or 'broadcast'"
 	}
@@ -125,7 +126,7 @@ func (h *NetworkHandler) dispatch(req ApplyRequest, command, executedBy string) 
 		cmd.ErrorOutput = "no devices connected"
 		_ = h.repo.UpdateStatus(cmd)
 		if req.TargetType == "broadcast" && h.snapshots != nil {
-			h.snapshots.RecordLocal("command", "网络规则变更", SnapshotPayload{Command: command}, nil)
+			h.snapshots.RecordLocalContext(ctx, "command", "网络规则变更", SnapshotPayload{Command: command}, nil)
 		}
 		return cmd, 0, ""
 	}
@@ -145,7 +146,7 @@ func (h *NetworkHandler) dispatch(req ApplyRequest, command, executedBy string) 
 		return delivered
 	}
 	if req.TargetType == "broadcast" && h.snapshots != nil {
-		h.snapshots.ObserveFanout("command", "网络规则变更", SnapshotPayload{Command: command}, send)
+		h.snapshots.ObserveFanoutContext(ctx, "command", "网络规则变更", SnapshotPayload{Command: command}, send)
 	} else {
 		send()
 	}

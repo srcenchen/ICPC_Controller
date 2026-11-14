@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ICPCRemoteControl/internal/biz"
@@ -38,19 +39,23 @@ type RoomSnapshot struct {
 }
 
 type FederationMessage struct {
-	DeviceID    int           `json:"device_id,omitempty"`
-	Cols        int           `json:"cols,omitempty"`
-	Rows        int           `json:"rows,omitempty"`
-	HD          bool          `json:"hd,omitempty"`
-	Type        string        `json:"type"`
-	ID          string        `json:"id,omitempty"`
-	Method      string        `json:"method,omitempty"`
-	Path        string        `json:"path,omitempty"`
-	Body        []byte        `json:"body,omitempty"`
-	Status      int           `json:"status,omitempty"`
-	ContentType string        `json:"content_type,omitempty"`
-	Disposition string        `json:"disposition,omitempty"`
-	Snapshot    *RoomSnapshot `json:"snapshot,omitempty"`
+	DeviceID     int           `json:"device_id,omitempty"`
+	Cols         int           `json:"cols,omitempty"`
+	Rows         int           `json:"rows,omitempty"`
+	HD           bool          `json:"hd,omitempty"`
+	Type         string        `json:"type"`
+	ID           string        `json:"id,omitempty"`
+	Method       string        `json:"method,omitempty"`
+	Path         string        `json:"path,omitempty"`
+	Body         []byte        `json:"body,omitempty"`
+	Status       int           `json:"status,omitempty"`
+	ContentType  string        `json:"content_type,omitempty"`
+	Disposition  string        `json:"disposition,omitempty"`
+	Snapshot     *RoomSnapshot `json:"snapshot,omitempty"`
+	SnapshotID   int64         `json:"snapshot_id,omitempty"`
+	SnapshotName string        `json:"snapshot_name,omitempty"`
+	SnapshotOpID int64         `json:"snapshot_op_id,omitempty"`
+	SkipOnline   bool          `json:"skip_online,omitempty"`
 }
 
 type relayConnection struct {
@@ -85,6 +90,7 @@ type Federation struct {
 	broadcastDir  string
 	backup        *BackupHandler
 	snapshots     *SnapshotManager
+	started       atomic.Bool
 }
 
 func (federation *Federation) SetSnapshotManager(snapshots *SnapshotManager) {
@@ -102,8 +108,10 @@ func (federation *Federation) ConfigureBroadcast(handler *BroadcastHandler, back
 
 func (federation *Federation) Start(ctx context.Context, local http.Handler) {
 	federation.local = local
+	federation.started.Store(true)
 	go federation.relayLoop(ctx)
 	go func() {
+		defer federation.started.Store(false)
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -199,7 +207,10 @@ func (federation *Federation) Connect(writer http.ResponseWriter, httpRequest *h
 	}()
 	federation.storeSnapshot(room)
 	if federation.snapshots != nil {
-		go federation.snapshots.ReplayToRoom(room.ID)
+		go func() {
+			federation.snapshots.PushCloudSyncToRoom(room.ID)
+			federation.snapshots.ReplayToRoom(room.ID)
+		}()
 	}
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -522,6 +533,12 @@ func (federation *Federation) runRelay(ctx context.Context, cfg DeploymentConfig
 			federation.handleRelayScreen(sessionCtx, connection, request, screenSessions)
 			continue
 		}
+		if request.Type == "snapshot_sync" {
+			if federation.snapshots != nil {
+				federation.snapshots.ApplyCloudSync(request.Body)
+			}
+			continue
+		}
 		if request.Type != "request" {
 			federation.handleRelayTerminal(sessionCtx, connection, request, terminalSessions)
 			continue
@@ -596,8 +613,12 @@ func (federation *Federation) executeRelay(ctx context.Context, cfg DeploymentCo
 			return response
 		}
 	}
+	reqCtx := ctx
+	if request.SnapshotOpID > 0 {
+		reqCtx = withCloudSnapshotOp(ctx, request.SnapshotID, request.SnapshotName, request.SnapshotOpID)
+	}
 	if request.Path == "/api/broadcast/sync" {
-		response = federation.applyBroadcast(ctx, cfg, request)
+		response = federation.applyBroadcast(reqCtx, cfg, request)
 		if response.Status == 503 {
 			_, err := federation.db.Exec(`DELETE FROM cluster_receipts WHERE id=? AND status='processing'`, request.ID)
 			if err == nil {
@@ -608,12 +629,20 @@ func (federation *Federation) executeRelay(ctx context.Context, cfg DeploymentCo
 	} else if request.Path == "/api/distribution/start" {
 		federation.pullMu.Lock()
 		defer federation.pullMu.Unlock()
-		if err := federation.prepareRelayFiles(ctx, cfg, &request); err != nil {
+		if err := federation.prepareRelayFiles(reqCtx, cfg, &request); err != nil {
 			response.Status = 400
 			response.Body, _ = json.Marshal(map[string]string{"error": err.Error()})
+		} else if request.SkipOnline && request.SnapshotOpID > 0 && federation.snapshots != nil {
+			federation.markSkipOnlineFromRequest(request)
+			response.Status = 200
+			response.Body = []byte(`{"message":"文件已缓存至机房快照（跳过当前在线设备）"}`)
 		} else {
-			response = federation.localRequest(ctx, request)
+			response = federation.localRequest(reqCtx, request)
 		}
+	} else if request.SkipOnline && request.SnapshotOpID > 0 && federation.snapshots != nil {
+		federation.markSkipOnlineFromRequest(request)
+		response.Status = 200
+		response.Body = []byte(`{"message":"已同步至机房快照（跳过当前在线设备）"}`)
 	} else {
 		if request.Path == "/api/power/schedules" && request.Method == "POST" {
 			var schedule scheduleRequest
@@ -623,14 +652,14 @@ func (federation *Federation) executeRelay(ctx context.Context, cfg DeploymentCo
 					response.Status = 400
 					response.Body = []byte(`{"error":"电源计划到达中转时已过期，未执行；请重新设置未来时间"}`)
 				} else {
-					response = federation.localRequest(ctx, request)
+					response = federation.localRequest(reqCtx, request)
 				}
 			} else {
 				response.Status = 400
 				response.Body = []byte(`{"error":"invalid power schedule"}`)
 			}
 		} else {
-			response = federation.localRequest(ctx, request)
+			response = federation.localRequest(reqCtx, request)
 		}
 	}
 	if request.Method != "GET" {
@@ -1045,6 +1074,8 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 		}
 		snapshotActive = all
 	}
+	var snapID, snapOpID int64
+	var snapName string
 	if snapshotActive {
 		rooms, err := federation.allRoomIDs()
 		if err != nil {
@@ -1057,6 +1088,29 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 		}
 		request.RoomIDs = rooms
 		request.Targets = nil
+
+		payload := SnapshotPayload{Rooms: request.RoomIDs}
+		summary := ""
+		switch request.Operation {
+		case "command":
+			payload.Command = request.Command
+			summary = "执行命令：" + snippet(request.Command, 80)
+		case "distribute":
+			payload.Files = manifest
+			payload.SaveDir = request.SaveDir
+			payload.PostCmd = request.PostCmd
+			names := make([]string, 0, len(manifest))
+			for _, file := range manifest {
+				names = append(names, file.Name)
+			}
+			summary = "分发文件：" + snippet(strings.Join(names, ", "), 80)
+		case "wol":
+			summary = "批量唤醒"
+		case "schedule":
+			payload.Action, payload.RunAt, payload.Note = request.Action, request.RunAt, request.Note
+			summary = "电源计划：" + request.Action + " @ " + request.RunAt
+		}
+		snapID, snapName, snapOpID = federation.snapshots.RecordCloud(request.Operation, summary, payload)
 	}
 	tx, err := federation.db.BeginTx(httpRequest.Context(), nil)
 	if err != nil {
@@ -1131,6 +1185,11 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 		}
 		for _, message := range messages {
 			message.Type, message.Method, message.ID = "request", "POST", uuid.NewString()
+			if snapOpID > 0 {
+				message.SnapshotID = snapID
+				message.SnapshotName = snapName
+				message.SnapshotOpID = snapOpID
+			}
 			raw, _ := json.Marshal(message)
 			if _, err := tx.Exec(`INSERT INTO cluster_jobs(id,room_id,request,created_at) VALUES(?,?,?,?)`, message.ID, room, string(raw), time.Now().UTC().Format(time.RFC3339)); err != nil {
 				writeJSON(writer, 500, map[string]string{"error": err.Error()})
@@ -1143,30 +1202,10 @@ func (federation *Federation) Queue(writer http.ResponseWriter, httpRequest *htt
 		writeJSON(writer, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if snapshotActive {
-		payload := SnapshotPayload{Rooms: request.RoomIDs}
-		summary := ""
-		switch request.Operation {
-		case "command":
-			payload.Command = request.Command
-			summary = "执行命令：" + snippet(request.Command, 80)
-		case "distribute":
-			payload.Files = manifest
-			payload.SaveDir = request.SaveDir
-			payload.PostCmd = request.PostCmd
-			names := make([]string, 0, len(manifest))
-			for _, file := range manifest {
-				names = append(names, file.Name)
-			}
-			summary = "分发文件：" + snippet(strings.Join(names, ", "), 80)
-		case "wol":
-			summary = "批量唤醒"
-		case "schedule":
-			payload.Action, payload.RunAt, payload.Note = request.Action, request.RunAt, request.Note
-			summary = "电源计划：" + request.Action + " @ " + request.RunAt
-		}
-		federation.snapshots.RecordCloud(request.Operation, summary, payload)
+	if snapOpID > 0 {
+		federation.snapshots.PushCloudSync()
 	}
+	federation.nudgeJobs()
 	writeJSON(writer, 202, map[string]interface{}{"job_ids": ids, "message": "已入队；离线机房恢复后投递，执行结果请查看机房命令记录"})
 }
 
@@ -1313,10 +1352,97 @@ func (federation *Federation) onlineRooms() []string {
 	return rooms
 }
 
+func (federation *Federation) nudgeJobs() {
+	if federation != nil && federation.started.Load() {
+		go federation.deliverJobs()
+	}
+}
+
+// BroadcastSnapshotSync pushes the Cloud's active snapshot state to all online rooms.
+func (federation *Federation) BroadcastSnapshotSync(body []byte) {
+	federation.mu.Lock()
+	conns := make([]*relayConnection, 0, len(federation.connections))
+	for _, c := range federation.connections {
+		if c != nil {
+			conns = append(conns, c)
+		}
+	}
+	federation.mu.Unlock()
+	msg := FederationMessage{Type: "snapshot_sync", Body: body}
+	for _, c := range conns {
+		_ = c.send(msg)
+	}
+}
+
+// SendSnapshotSync sends the Cloud's active snapshot state to one connected room.
+func (federation *Federation) SendSnapshotSync(roomID string, body []byte) {
+	federation.mu.Lock()
+	conn := federation.connections[roomID]
+	federation.mu.Unlock()
+	if conn != nil {
+		_ = conn.send(FederationMessage{Type: "snapshot_sync", Body: body})
+	}
+}
+
+func (federation *Federation) cancelQueuedSnapshotJobs(opID int64) {
+	rows, err := federation.db.Query(`SELECT id, request FROM cluster_jobs WHERE status='queued'`)
+	if err != nil {
+		return
+	}
+	var toCancel []string
+	for rows.Next() {
+		var id, raw string
+		if rows.Scan(&id, &raw) != nil {
+			continue
+		}
+		var msg FederationMessage
+		if json.Unmarshal([]byte(raw), &msg) == nil && msg.SnapshotOpID == opID {
+			toCancel = append(toCancel, id)
+		}
+	}
+	rows.Close()
+	for _, id := range toCancel {
+		_, _ = federation.db.Exec(`UPDATE cluster_jobs SET status='cancelled' WHERE id=? AND status='queued'`, id)
+	}
+}
+
+func (federation *Federation) markSkipOnlineFromRequest(request FederationMessage) {
+	if federation.snapshots == nil || request.SnapshotOpID <= 0 {
+		return
+	}
+	switch request.Path {
+	case "/api/commands":
+		var req ExecuteRequest
+		if json.Unmarshal(request.Body, &req) == nil {
+			federation.snapshots.MarkRemoteOpSkipOnline(request.SnapshotID, request.SnapshotName, request.SnapshotOpID, "command", "执行命令："+snippet(req.Command, 80), SnapshotPayload{Kind: "command", Command: req.Command})
+		}
+	case "/api/distribution/start":
+		var body struct {
+			Files   []string `json:"files"`
+			SaveDir string   `json:"save_dir"`
+			PostCmd string   `json:"post_cmd"`
+		}
+		if json.Unmarshal(request.Body, &body) == nil {
+			files := make([]RelayFile, 0, len(body.Files))
+			for _, name := range body.Files {
+				files = append(files, RelayFile{Name: name})
+			}
+			federation.snapshots.MarkRemoteOpSkipOnline(request.SnapshotID, request.SnapshotName, request.SnapshotOpID, "distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Kind: "distribute", Files: files, SaveDir: body.SaveDir, PostCmd: body.PostCmd})
+		}
+	case "/api/power/wol":
+		federation.snapshots.MarkRemoteOpSkipOnline(request.SnapshotID, request.SnapshotName, request.SnapshotOpID, "wol", "批量唤醒", SnapshotPayload{Kind: "wol"})
+	case "/api/power/schedules":
+		var req scheduleRequest
+		if json.Unmarshal(request.Body, &req) == nil {
+			federation.snapshots.MarkRemoteOpSkipOnline(request.SnapshotID, request.SnapshotName, request.SnapshotOpID, "schedule", "电源计划："+req.Action+" @ "+req.RunAt, SnapshotPayload{Kind: "schedule", Action: req.Action, RunAt: req.RunAt, Note: req.Note})
+		}
+	}
+}
+
 // enqueueSnapshotOp converts a recorded cloud snapshot operation into a relay
 // job for the given room. The room re-applies it to all of its devices and
 // records it in its own local snapshot.
-func (federation *Federation) enqueueSnapshotOp(roomID string, op data.SnapshotOp) error {
+func (federation *Federation) enqueueSnapshotOp(roomID string, snapshot *data.OperationSnapshot, op data.SnapshotOp, skipOnline bool) error {
 	var payload SnapshotPayload
 	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
 		return err
@@ -1344,6 +1470,12 @@ func (federation *Federation) enqueueSnapshotOp(roomID string, op data.SnapshotO
 		return fmt.Errorf("未知快照类型 %q", payload.Kind)
 	}
 	message.Type, message.Method, message.ID = "request", "POST", uuid.NewString()
+	if snapshot != nil {
+		message.SnapshotID = snapshot.ID
+		message.SnapshotName = snapshot.Name
+	}
+	message.SnapshotOpID = op.ID
+	message.SkipOnline = skipOnline
 	raw, _ := json.Marshal(message)
 	_, err := federation.db.Exec(`INSERT INTO cluster_jobs(id,room_id,request,created_at) VALUES(?,?,?,?)`,
 		message.ID, roomID, string(raw), time.Now().UTC().Format(time.RFC3339Nano))

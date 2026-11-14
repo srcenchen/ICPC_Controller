@@ -497,3 +497,178 @@ func mustOnlyOp(test *testing.T, manager *SnapshotManager) int64 {
 	}
 	return ops[0].ID
 }
+
+func (client *scriptedClient) waitCommandOrder(test *testing.T, want []string) {
+	test.Helper()
+	got := make([]string, 0, len(want))
+	deadline := time.After(3 * time.Second)
+	for len(got) < len(want) {
+		select {
+		case line := <-client.lines:
+			var msg struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			}
+			if json.Unmarshal([]byte(line), &msg) == nil && msg.Command != "" {
+				got = append(got, msg.Command)
+			}
+		case <-deadline:
+			test.Fatalf("timed out waiting for commands: got %v, want %v", got, want)
+		}
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			test.Fatalf("command[%d] = %q, want %q (full got=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestCustomAddReorderAndCloudToRoomInsertionReplayOrder(test *testing.T) {
+	// Set up Relay Room A with local command handler + snapshot manager.
+	room := testFederation(test)
+	roomNodeID := uuid.NewString()
+	if err := room.settings.SetDeployment(DeploymentConfig{
+		Mode:          "relay",
+		NodeID:        roomNodeID,
+		RoomName:      "机房A",
+		CloudURL:      "https://cloud.example.com",
+		Token:         "abcdefghijklmnopqrstuvwxyz012345",
+		DeviceIDStart: 1,
+	}); err != nil {
+		test.Fatal(err)
+	}
+	roomCmdRepo := data.NewCommandRepo(room.db)
+	roomDispatcher := biz.NewCommandDispatcher(room.hub, roomCmdRepo)
+	roomSnap := NewSnapshotManager(data.NewSnapshotRepo(room.db), room.settings, room.devices, room.hub, roomDispatcher)
+	roomCmdH := NewCommandHandler(roomCmdRepo, roomDispatcher, room.hub, room.settings)
+	roomCmdH.SetSnapshotManager(roomSnap)
+	room.SetSnapshotManager(roomSnap)
+	roomSnap.SetFederation(room)
+	room.hub.SetConnectHook(roomSnap.ReplayToDevice)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/commands", roomCmdH.Execute)
+	mux.HandleFunc("GET /api/snapshots", roomSnap.List)
+	mux.HandleFunc("GET /api/snapshots/{id}/ops", roomSnap.Ops)
+	mux.HandleFunc("POST /api/snapshots/{id}/ops", roomSnap.AddCustomOp)
+	mux.HandleFunc("PUT /api/snapshots/{id}/ops/reorder", roomSnap.ReorderOps)
+	mux.HandleFunc("DELETE /api/snapshots/{id}/ops/{opID}", roomSnap.DeleteOp)
+	room.local = mux
+
+	// Device 1 is already online in Room A before Cloud starts its snapshot.
+	dev1 := registerScripted(test, room.hub, 1, true)
+
+	// Cloud creates active snapshot with R1 ("cloud-1") and R2 ("cloud-2") via HTTP AddCustomOp.
+	cloud := testFederation(test)
+	if err := cloud.settings.SetDeployment(DeploymentConfig{Mode: "cloud", Token: "abcdefghijklmnopqrstuvwxyz012345", DeviceIDStart: 1}); err != nil {
+		test.Fatal(err)
+	}
+	cloudCmdRepo := data.NewCommandRepo(cloud.db)
+	cloudDispatcher := biz.NewCommandDispatcher(cloud.hub, cloudCmdRepo)
+	cloudSnap := NewSnapshotManager(data.NewSnapshotRepo(cloud.db), cloud.settings, cloud.devices, cloud.hub, cloudDispatcher)
+	cloud.SetSnapshotManager(cloudSnap)
+	cloudSnap.SetFederation(cloud)
+	cloud.storeSnapshot(&RoomSnapshot{ID: roomNodeID, Name: "机房A", Devices: []model.DeviceSummary{{AssignedID: 1, Connected: true}}})
+
+	startRec := httptest.NewRecorder()
+	cloudSnap.StartSnapshot(startRec, httptest.NewRequest("POST", "/api/snapshots", bytes.NewReader([]byte(`{"name":"2026 省赛"}`))))
+	if startRec.Code != http.StatusCreated {
+		test.Fatalf("start cloud snapshot: %d %s", startRec.Code, startRec.Body.String())
+	}
+	cloudActive := cloudSnap.Active()
+
+	addCloudOp := func(cmd string) data.SnapshotOp {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", fmt.Sprintf("/api/snapshots/%d/ops", cloudActive.ID), bytes.NewReader([]byte(fmt.Sprintf(`{"kind":"command","command":%q}`, cmd))))
+		req.SetPathValue("id", fmt.Sprintf("%d", cloudActive.ID))
+		cloudSnap.AddCustomOp(rec, req)
+		if rec.Code != http.StatusCreated {
+			test.Fatalf("add cloud op: %d %s", rec.Code, rec.Body.String())
+		}
+		var op data.SnapshotOp
+		_ = json.Unmarshal(rec.Body.Bytes(), &op)
+		return op
+	}
+	op1 := addCloudOp("cloud-1")
+	op2 := addCloudOp("cloud-2")
+
+	// Sync Cloud snapshot to Room A and deliver the two queued cluster_jobs to Room A.
+	syncBytes, err := cloudSnap.BuildCloudSync()
+	if err != nil {
+		test.Fatal(err)
+	}
+	roomSnap.ApplyCloudSync(syncBytes)
+
+	rows, err := cloud.db.Query(`SELECT request FROM cluster_jobs WHERE room_id=? ORDER BY created_at ASC`, roomNodeID)
+	if err != nil {
+		test.Fatal(err)
+	}
+	var jobFrames []FederationMessage
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			test.Fatal(err)
+		}
+		var msg FederationMessage
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			test.Fatal(err)
+		}
+		jobFrames = append(jobFrames, msg)
+	}
+	rows.Close()
+	if len(jobFrames) != 2 {
+		test.Fatalf("expected 2 queued jobs for room, got %d", len(jobFrames))
+	}
+	for _, frame := range jobFrames {
+		resp := room.executeRelay(test.Context(), room.settings.GetDeployment(), frame)
+		if resp.Status >= 400 {
+			test.Fatalf("relay execution failed: %d %s", resp.Status, string(resp.Body))
+		}
+	}
+
+	// Online Device 1 must have executed cloud-1 then cloud-2 ONCE, and a subsequent
+	// ReplayToDevice(1) must NOT duplicate either command!
+	dev1.waitCommandOrder(test, []string{"cloud-1", "cloud-2"})
+	roomSnap.ReplayToDevice(1)
+	if extra := dev1.collectCommands(test, "cloud-", 150*time.Millisecond); extra != 0 {
+		test.Fatalf("online device received duplicate replay: %d", extra)
+	}
+
+	// Room A now inserts a custom room-local operation RIGHT AFTER cloud-1!
+	roomActive := roomSnap.Active()
+	if roomActive == nil || roomActive.RemoteID != cloudActive.ID {
+		test.Fatalf("room did not mirror cloud snapshot: %+v", roomActive)
+	}
+	roomOps, err := roomSnap.repo.ListOps(roomActive.ID)
+	if err != nil || len(roomOps) != 2 {
+		test.Fatalf("room ops: %+v %v", roomOps, err)
+	}
+	insertRec := httptest.NewRecorder()
+	insertReq := httptest.NewRequest("POST", fmt.Sprintf("/api/snapshots/%d/ops", roomActive.ID),
+		bytes.NewReader([]byte(fmt.Sprintf(`{"kind":"command","command":"room-insert","after_op_id":%d,"skip_online":true}`, roomOps[0].ID))))
+	insertReq.SetPathValue("id", fmt.Sprintf("%d", roomActive.ID))
+	roomSnap.AddCustomOp(insertRec, insertReq)
+	if insertRec.Code != http.StatusCreated {
+		test.Fatalf("room insert op: %d %s", insertRec.Code, insertRec.Body.String())
+	}
+
+	// Late Device 2 connects to Room A -> must receive cloud-1, room-insert, cloud-2 in exact order!
+	dev2 := registerScripted(test, room.hub, 2, true)
+	dev2.waitCommandOrder(test, []string{"cloud-1", "room-insert", "cloud-2"})
+
+	// Cloud now reorders [cloud-2, cloud-1] and pushes sync -> Room A becomes [cloud-2, cloud-1, room-insert]!
+	reorderRec := httptest.NewRecorder()
+	reorderReq := httptest.NewRequest("PUT", fmt.Sprintf("/api/snapshots/%d/ops/reorder", cloudActive.ID),
+		bytes.NewReader([]byte(fmt.Sprintf(`{"op_ids":[%d,%d]}`, op2.ID, op1.ID))))
+	reorderReq.SetPathValue("id", fmt.Sprintf("%d", cloudActive.ID))
+	cloudSnap.ReorderOps(reorderRec, reorderReq)
+	if reorderRec.Code != http.StatusOK {
+		test.Fatalf("cloud reorder: %d %s", reorderRec.Code, reorderRec.Body.String())
+	}
+	syncBytes2, _ := cloudSnap.BuildCloudSync()
+	roomSnap.ApplyCloudSync(syncBytes2)
+
+	// Late Device 3 connects to Room A -> must receive cloud-2, cloud-1, room-insert!
+	dev3 := registerScripted(test, room.hub, 3, true)
+	dev3.waitCommandOrder(test, []string{"cloud-2", "cloud-1", "room-insert"})
+}

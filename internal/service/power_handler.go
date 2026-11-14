@@ -108,7 +108,7 @@ func (h *PowerHandler) Wake(w http.ResponseWriter, r *http.Request) {
 				delivered = append(delivered, result.DeviceID)
 			}
 		}
-		h.snapshots.RecordLocal("wol", "批量唤醒", SnapshotPayload{}, delivered)
+		h.snapshots.RecordLocalContext(r.Context(), "wol", "批量唤醒", SnapshotPayload{}, delivered)
 	}
 	h.hub.BroadcastAdminEvent("power_wol", map[string]interface{}{
 		"sent":  sent,
@@ -271,7 +271,7 @@ func (h *PowerHandler) createSchedule(w http.ResponseWriter, r *http.Request) {
 		// Nobody has received this yet. Marking the currently online machines
 		// would both skip their catch-up if they are offline at fire time and
 		// make a later joiner look like it needs its own copy.
-		h.snapshots.RecordLocal("schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note}, nil)
+		h.snapshots.RecordLocalContext(r.Context(), "schedule", "电源计划："+s.Action+" @ "+s.RunAt, SnapshotPayload{Action: s.Action, RunAt: s.RunAt, Note: s.Note}, nil)
 	}
 	h.hub.BroadcastAdminEvent("power_schedule_created", map[string]interface{}{"id": s.ID})
 	writeJSON(w, http.StatusOK, s)

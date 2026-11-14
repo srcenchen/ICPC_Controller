@@ -169,17 +169,24 @@ func migrate(db *sql.DB) error {
 			scope      TEXT    NOT NULL DEFAULT 'local',
 			scope_id   TEXT    NOT NULL DEFAULT '',
 			active     INTEGER NOT NULL DEFAULT 1,
+			remote_id  INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT    NOT NULL,
 			ended_at   TEXT    NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_operation_snapshots_scope ON operation_snapshots(scope, active)`,
 		`CREATE TABLE IF NOT EXISTS snapshot_ops (
-			id          INTEGER PRIMARY KEY AUTOINCREMENT,
-			snapshot_id INTEGER NOT NULL,
-			kind        TEXT    NOT NULL,
-			payload     TEXT    NOT NULL DEFAULT '{}',
-			summary     TEXT    NOT NULL DEFAULT '',
-			created_at  TEXT    NOT NULL
+			id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+			snapshot_id         INTEGER NOT NULL,
+			kind                TEXT    NOT NULL,
+			payload             TEXT    NOT NULL DEFAULT '{}',
+			summary             TEXT    NOT NULL DEFAULT '',
+			sort_order          INTEGER NOT NULL DEFAULT 0,
+			source              TEXT    NOT NULL DEFAULT 'local',
+			remote_op_id        INTEGER NOT NULL DEFAULT 0,
+			anchor_remote_op_id INTEGER NOT NULL DEFAULT 0,
+			room_ready          INTEGER NOT NULL DEFAULT 1,
+			deleted_locally     INTEGER NOT NULL DEFAULT 0,
+			created_at          TEXT    NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshot_ops_snapshot ON snapshot_ops(snapshot_id)`,
 		`CREATE TABLE IF NOT EXISTS snapshot_deliveries (
@@ -216,6 +223,13 @@ func migrate(db *sql.DB) error {
 		{"devices", "health_at", "TEXT NOT NULL DEFAULT ''"},
 		{"devices", "client_version", "TEXT NOT NULL DEFAULT ''"},
 		{"command_log", "parent_id", "INTEGER"},
+		{"operation_snapshots", "remote_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"snapshot_ops", "sort_order", "INTEGER NOT NULL DEFAULT 0"},
+		{"snapshot_ops", "source", "TEXT NOT NULL DEFAULT 'local'"},
+		{"snapshot_ops", "remote_op_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"snapshot_ops", "anchor_remote_op_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"snapshot_ops", "room_ready", "INTEGER NOT NULL DEFAULT 1"},
+		{"snapshot_ops", "deleted_locally", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, ac := range addColumns {
 		if err := addColumnIfMissing(db, ac.table, ac.column, ac.def); err != nil {

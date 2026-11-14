@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -94,7 +95,7 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 		cmd.ErrorOutput = "no devices connected"
 		_ = h.repo.UpdateStatus(cmd)
 		if cmd.TargetType == "broadcast" {
-			h.observeCommand(cmd, nil)
+			h.observeCommand(r.Context(), cmd, nil)
 		}
 		writeJSON(w, http.StatusCreated, cmd)
 		return
@@ -106,14 +107,14 @@ func (h *CommandHandler) Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	cmd.Children = children
 	if cmd.TargetType == "broadcast" {
-		h.observeCommand(cmd, children)
+		h.observeCommand(r.Context(), cmd, children)
 	} else {
 		h.dispatcher.SendPrepared(cmd.ID, children)
 	}
 	writeJSON(w, http.StatusCreated, cmd)
 }
 
-func (h *CommandHandler) observeCommand(cmd *model.CommandLog, children []*model.CommandLog) {
+func (h *CommandHandler) observeCommand(ctx context.Context, cmd *model.CommandLog, children []*model.CommandLog) {
 	send := func() []int {
 		if len(children) == 0 {
 			return nil
@@ -131,7 +132,7 @@ func (h *CommandHandler) observeCommand(cmd *model.CommandLog, children []*model
 		send()
 		return
 	}
-	h.snapshots.ObserveFanout("command", "执行命令："+snippet(cmd.Command, 80), SnapshotPayload{Command: cmd.Command}, send)
+	h.snapshots.ObserveFanoutContext(ctx, "command", "执行命令："+snippet(cmd.Command, 80), SnapshotPayload{Command: cmd.Command}, send)
 }
 
 // List returns paginated command history (GET /api/commands?limit=50&offset=0).

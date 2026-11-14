@@ -181,6 +181,9 @@ func New(cfg Config) *Server {
 		mux.HandleFunc("POST /api/snapshots/{id}/end", cfg.Snapshots.EndSnapshot)
 		mux.HandleFunc("DELETE /api/snapshots/{id}", cfg.Snapshots.DeleteSnapshot)
 		mux.HandleFunc("GET /api/snapshots/{id}/ops", cfg.Snapshots.Ops)
+		mux.HandleFunc("POST /api/snapshots/{id}/ops", cfg.Snapshots.AddCustomOp)
+		mux.HandleFunc("PUT /api/snapshots/{id}/ops/reorder", cfg.Snapshots.ReorderOps)
+		mux.HandleFunc("POST /api/snapshots/{id}/ops/restore-remote", cfg.Snapshots.RestoreRemoteOps)
 		mux.HandleFunc("DELETE /api/snapshots/{id}/ops/{opID}", cfg.Snapshots.DeleteOp)
 	}
 

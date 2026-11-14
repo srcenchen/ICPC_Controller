@@ -132,17 +132,26 @@ func (h *DistributionHandler) StartTask(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	filesPayload := func() []RelayFile {
+		out := make([]RelayFile, 0, len(body.Files))
+		for _, name := range body.Files {
+			out = append(out, RelayFile{Name: name})
+		}
+		return out
+	}
+
 	task, err := h.mgr.StartTask(body.Files, body.SaveDir, body.TargetIDs, body.ServerIP, body.PostCmd)
 	if err != nil {
+		if len(body.TargetIDs) == 0 && h.snapshots != nil && strings.Contains(err.Error(), "没有可分发的设备") && cloudSnapshotFromContext(r.Context()) != nil {
+			h.snapshots.RecordLocalContext(r.Context(), "distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: filesPayload(), SaveDir: body.SaveDir, PostCmd: body.PostCmd}, nil)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "cached", "message": "文件已缓存至机房，设备上线后将通过操作快照自动分发"})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if len(body.TargetIDs) == 0 && h.snapshots != nil {
-		files := make([]RelayFile, 0, len(body.Files))
-		for _, name := range body.Files {
-			files = append(files, RelayFile{Name: name})
-		}
-		h.snapshots.RecordLocal("distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: files, SaveDir: body.SaveDir, PostCmd: body.PostCmd}, task.TargetIDs)
+		h.snapshots.RecordLocalContext(r.Context(), "distribute", "分发文件："+snippet(strings.Join(body.Files, ", "), 80), SnapshotPayload{Files: filesPayload(), SaveDir: body.SaveDir, PostCmd: body.PostCmd}, task.TargetIDs)
 	}
 
 	writeJSON(w, http.StatusOK, task)
